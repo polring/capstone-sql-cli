@@ -8,7 +8,7 @@
 | --- | --- |
 | `engine/loader.c` | GGUF 로더 + forward + BPE + greedy 생성. 한 파일로 빌드된다 |
 | `postprocessor/` | 생성된 SQL의 예약어·식별자 오타 교정 라이브러리와 CLI ([README](postprocessor/README.md)) |
-| `fixtures/v<N>/` | 계약 버전별 작은 테스트 모델과 기대값 (CONTRACT.md 7절) |
+| `fixtures/v<N>/<세트>/` | 계약 버전별 작은 테스트 모델과 기대값 (CONTRACT.md 7절) |
 | `tests/fixture_test.c` | fixture 기대값과 엔진 계산을 비교하는 테스트 |
 | `tests/error_test.c` | 잘못된 인자·손상된 모델 파일을 오류로 거부하는지 확인하는 테스트 |
 | `scripts/fetch-model` | 학습 저장소 release에서 모델을 받아 sha256 확인 |
@@ -47,9 +47,11 @@ Windows에서는 `build\loader.exe`다. `fetch-model`은 bash 스크립트라 Wi
 ## 계약 버전이 바뀔 때
 
 1. 학습 저장소가 `CONTRACT_VERSION`을 올리고 `python -m src.export_fixtures --new-model`로 새 fixture를 만든다.
-2. 이 저장소에서 그 fixture를 `fixtures/v<새 버전>/`에 복사하고(`manifest.json`의 sha256으로 확인), 엔진의
+2. 이 저장소에서 학습 저장소의 `tests/fixtures/contract/v<새 버전>/`을 `fixtures/v<새 버전>/`에 복사하고
+   (`manifest.json`의 sha256으로 확인), `Makefile`의 `ERROR_FIXTURE`와 `tests/error_test.c`의 기대 메시지도 확인한 뒤 엔진의
    `CONTRACT_VERSION`과 계산을 고쳐 `make test`를 통과시킨다. [CONTRACT.md](CONTRACT.md)도 함께 고친다.
-3. 그다음 학습 저장소가 새 버전 태그로 release를 올린다.
+3. 이 저장소가 먼저 병합된 뒤 학습 저장소가 새 버전 태그로 release를 올린다(release workflow가 이 저장소 main으로
+   생성을 확인한다).
 
 ## 코드 구조
 
@@ -106,7 +108,8 @@ clang-format --dry-run --Werror engine/loader.c     # 검사만
   정책(`WinError 4551`)으로 실행이 막혀 그날은 확인하지 못했다(10-07 재검증).
 - 2026-10-07: 계약 v2. seed 개수 0/2/45, 바뀐 특수 토큰 ID와 seed/merge 시작 ID, 잘못된 ID 범위·충돌·병합 참조,
   계약 v1 거부를 검증했다. `stock_` 토큰화 불일치를 찾아 고쳤다(CONTRACT.md 4절 3번).
-- 2026-10-12: 학습 저장소에서 분리(`git subtree split`, 이전 히스토리 보존). Python 없이 도는 fixture 테스트와
-  오류 경로 테스트(학습 저장소 `tests/test_inference.py`에서 이전) 추가. `generate_tokens`는 생성한 ID를 추가만 하고
+- 2026-10-12: 학습 저장소에서 분리(`git filter-branch`로 `src/loader.c`·`src/postprocessor/c/` 시절 이력까지 보존).
+  Python 없이 도는 fixture 테스트(세트 4개)와 오류 경로 테스트 39개(학습 저장소 `tests/test_inference.py`,
+  `tests/test_tokenizer_contract.py`의 C 테스트에서 이전) 추가. 동점 시 특수 토큰을 건너뛰는 테스트는 옮기지 못했다. `generate_tokens`는 생성한 ID를 추가만 하고
   출력은 `run_generation_command`가 한다(CLI 출력은 같다). 분리 전 시험 release(`stage1-contract2-rc1`)의
   `model.gguf`로 C 엔진과 Python 추론의 SQL 일치를 확인했다.

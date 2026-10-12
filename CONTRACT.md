@@ -13,7 +13,8 @@
   pre-tokenizer 규칙 변경, 위치 토큰 도입, 메타데이터 키나 텐서 이름 변경.
 - **버전을 올리지 않는 경우**: 값만 바뀔 때. 모델 크기, vocab 크기, seed·merge 내용, eps·theta 값은 메타데이터로
   전달되므로 같은 버전이다(예: 1단계 → 2단계 모델 전환).
-- 버전을 올리면 학습 저장소에서 `python -m src.export_fixtures --new-model`로 `fixtures/v<새 버전>/`을 만든다.
+- 버전을 올리면 학습 저장소에서 `python -m src.export_fixtures --new-model`로 `tests/fixtures/contract/v<새 버전>/`을
+  만들고, 이 저장소의 `fixtures/v<새 버전>/`으로 그대로 복사한다.
   이전 버전 fixture는 엔진이 그 버전을 지원하는 동안 지우지 않는다.
 
 | 버전 | 내용 |
@@ -118,13 +119,17 @@ ID 배치: `0~255` 바이트, 특수 토큰(`pad_id`…`sep_id`), seed(`seed_bas
 
 ## 7. fixture
 
-`fixtures/v<N>/`은 학습 저장소의 `python -m src.export_fixtures`가 만든다.
+`fixtures/v<N>/`은 학습 저장소의 `python -m src.export_fixtures`가 만든 `tests/fixtures/contract/v<N>/`의 사본이다.
+세트마다 폴더 하나에 `model.gguf`(이 버전의 계약으로 쓴 작은 무작위 모델, context 32)와 `cases.txt`(Python이 계산한
+기대값: 토큰화, 마지막 위치 logits, greedy 생성 결과와 종료 이유)가 있고, `manifest.json`에 계약 버전과 모든 파일의
+sha256이 있다.
 
-| 파일 | 내용 |
+| 세트 | 확인하는 것 |
 | --- | --- |
-| `model.gguf` | 작은 무작위 모델 (vocab 320, dim 16, 2층, context 32). 이 버전의 계약으로 쓴 파일 |
-| `cases.txt` | Python이 계산한 기대값: 토큰화, 마지막 위치 logits, greedy 생성 결과와 종료 이유 |
-| `manifest.json` | 계약 버전과 두 파일의 sha256 |
+| `base` | 현재 단계의 seed와 기본 배치(특수 256~259, seed 260~), 학습된 merge 12개. 토큰화 경계, 문맥 길이 종료 |
+| `custom_layout` | 특수 266~269, seed 270~ 2개, merge 272 하나. 파일의 배치를 그대로 따르는지 |
+| `no_seeds` | seed 0개 |
+| `many_seeds` | seed 45개 |
 
 `cases.txt`는 탭으로 구분하고, 문자열은 UTF-8 바이트를 hex로 적는다(빈 문자열은 빈 칸).
 
@@ -134,6 +139,6 @@ logits    <token id ...>    <logit ...>                       # vocab_size 개
 generate  <max_new_tokens>    <question>    <output>    <eos | max_new_tokens | context>
 ```
 
-엔진은 `make test`에서 이 값과 비교한다. logits 허용 오차는 `atol = rtol = 2e-5`이고, 토큰 ID와 생성 바이트는
+엔진은 `make test`에서 모든 세트와 비교한다. logits 허용 오차는 `atol = rtol = 2e-5`이고, 토큰 ID와 생성 바이트는
 정확히 같아야 한다. 학습 저장소는 같은 model.gguf로 기대값을 다시 계산해 커밋된 값과 비교하므로, 계산이 바뀌었는데
 버전을 올리지 않으면 그쪽 CI가 실패한다.

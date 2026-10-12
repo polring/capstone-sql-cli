@@ -12,10 +12,11 @@ endif
 LOADER = $(BUILD_DIR)/loader$(EXE)
 FIXTURE_TEST = $(BUILD_DIR)/fixture_test$(EXE)
 ERROR_TEST = $(BUILD_DIR)/error_test$(EXE)
-# Every contract version the engine supports keeps its fixtures here.
-FIXTURE_DIRS = $(wildcard fixtures/v*)
+# Every contract version the engine supports keeps its fixture sets here
+# (fixtures/v<N>/<set>/model.gguf + cases.txt).
+FIXTURE_DIRS = $(patsubst %/cases.txt,%,$(wildcard fixtures/v*/*/cases.txt))
 # Error cases corrupt this model at known offsets (context 32, merge_base 298).
-ERROR_FIXTURE = fixtures/v2/model.gguf
+ERROR_FIXTURE = fixtures/v2/base/model.gguf
 
 .PHONY: all engine postprocessor test test-fixtures test-errors test-postprocessor clean
 

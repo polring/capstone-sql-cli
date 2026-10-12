@@ -345,6 +345,34 @@ static void test_incompatible_config(TestContext *context, const ByteBuffer *fix
     }
 }
 
+static void test_tokenizer_layout(TestContext *context, const ByteBuffer *fixture) {
+    /* The base fixture uses PAD..SEP = 256..259, seeds from 260 and merges from
+     * 298 (12 merges, vocab 320). Each value breaks one layout rule. */
+    static const struct {
+        const char *key;
+        uint32_t value;
+    } cases[] = {
+        {"capstone_sql.tokenizer.pad_id", 0},       /* inside byte IDs */
+        {"capstone_sql.tokenizer.bos_id", 258},     /* duplicates EOS */
+        {"capstone_sql.tokenizer.sep_id", 260},     /* inside seed IDs */
+        {"capstone_sql.tokenizer.merge_base", 320}, /* merges exceed vocab */
+        {"capstone_sql.tokenizer.seed_base", 400},  /* beyond merge_base */
+    };
+
+    for (size_t index = 0; index < sizeof(cases) / sizeof(cases[0]); index++) {
+        ByteBuffer model = copy_buffer(fixture);
+        size_t position = find_after(&model, cases[index].key, 0) + 4;
+        put_uint32(&model, position, cases[index].value);
+        expect_file_rejected(context, cases[index].key, &model,
+                             "invalid tokenizer layout");
+        free(model.data);
+    }
+    ByteBuffer model = copy_buffer(fixture);
+    put_uint32(&model, find_after(&model, "capstone_sql.contract_version", 0) + 4, 1);
+    expect_file_rejected(context, "contract v1", &model, "re-export as version 2");
+    free(model.data);
+}
+
 int main(int argc, char **argv) {
     if (argc != 4) {
         fprintf(stderr, "usage: %s LOADER MODEL.gguf WORK_DIR\n", argv[0]);
@@ -363,6 +391,7 @@ int main(int argc, char **argv) {
     test_eos_stop(&context, &fixture);
     test_corrupted_files(&context, &fixture);
     test_incompatible_config(&context, &fixture);
+    test_tokenizer_layout(&context, &fixture);
     printf("error cases: %d passed, %d failed\n", context.passed, context.failed);
     free(fixture.data);
     return context.failed || !context.passed;
