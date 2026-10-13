@@ -224,21 +224,27 @@ SELECT city FROM customers
 
 ## 5. 컴파일 방법 (CMake 통합 빌드)
 
-### 모든 OS 공통 (Linux, macOS, Windows)
+### 1) CLI 실행 파일 단독 빌드 (`sql-cli`)
 ```bash
-# 1. 빌드 디렉터리 구성
+# 1. 빌드 디렉터리 구성 (최초 1회)
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 
-# 2. 컴파일 및 실행 파일 생성 (build/sql-cli 또는 build/sql-cli.exe)
-cmake --build build --config Release
-
-# 3. 전체 테스트 검증 (CTest)
-ctest --test-dir build -C Release --output-on-failure
+# 2. sql-cli 단독 컴파일 (build/sql-cli 또는 build/sql-cli.exe 생성)
+cmake --build build --target sql-cli --config Release
 ```
 
-### Windows (Visual Studio 개발자 환경이 PATH에 없는 경우)
-```powershell
-cmd.exe /c 'call "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat" && cmake -B build && cmake --build build --config Release'
+> **Windows (PowerShell 한 줄 빌드)**:
+> ```powershell
+> cmd.exe /c 'call "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat" && cmake -B build && cmake --build build --target sql-cli --config Release'
+> ```
+
+### 2) 전체 빌드 및 검증 테스트 실행 (CTest)
+```bash
+# 1. 전체 타깃 일괄 컴파일
+cmake --build build --config Release
+
+# 2. CTest 테스트 실행 (전체 통과 시 약 1초 소요)
+ctest --test-dir build -C Release --output-on-failure
 ```
 
 ---

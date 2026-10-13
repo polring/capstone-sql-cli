@@ -49,37 +49,40 @@ CLI(콘솔) 환경과 크로스플랫폼 GUI(Uno Platform) 환경에서 동일�
 
 본 프로젝트는 **CMake(`CMakeLists.txt`)**를 기반으로 **Linux, macOS, Windows 모든 플랫폼에서 동일한 명령어**로 빌드 및 테스트를 수행합니다.
 
-### 1) 빌드 (모든 OS 공통)
+### 1) CLI 실행 파일 단독 빌드 (`sql-cli`)
+테스트용 바이너리를 제외하고 **실제 사용할 콘솔 실행 파일(`sql-cli`)만 빌드**합니다:
+
 ```bash
 # 1. 빌드 환경 설정 (최초 1회)
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 
-# 2. 컴파일 및 실행 파일 생성 (build/sql-cli 또는 build/sql-cli.exe 생성)
-cmake --build build --config Release
+# 2. sql-cli 실행 파일 빌드
+cmake --build build --target sql-cli --config Release
 ```
+* **생성 위치**: `build/sql-cli` (Linux/macOS) 또는 `build/sql-cli.exe` (Windows)
 
-### 2) 전체 테스트 실행 (CTest)
-모든 회귀 테스트(후처리기 단위 테스트 17건, 오류 거부 테스트 39건, 계약 픽스처 테스트 53건)를 일괄 검증합니다:
-```bash
-ctest --test-dir build -C Release --output-on-failure
-```
+> **Windows 팁 (PowerShell에서 한 줄로 빌드)**:
+> ```powershell
+> cmd.exe /c 'call "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat" && cmake -B build && cmake --build build --target sql-cli --config Release'
+> ```
 
 ---
 
-### 플랫폼별 참고 사항
+### 2) 전체 빌드 및 검증 테스트 실행 (CTest)
+`sql-cli`를 포함한 모든 테스트 도구를 일괄 빌드하고, 전체 회귀 테스트(후처리기 단위 테스트 17건, 오류 거부 테스트 39건, 계약 픽스처 테스트 53건)를 실행합니다:
 
-#### Windows (Visual Studio / MSVC)
-* `cmake` 및 `ctest` 명령어가 일반 PowerShell/CMD에서 인식되지 않는 경우, Visual Studio 개발자 환경(`vcvars64.bat`)을 통해 실행합니다:
-  ```powershell
-  # PowerShell에서 한 줄로 환경 로드 및 빌드/테스트 (추천)
-  cmd.exe /c 'call "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat" && cmake -B build && cmake --build build --config Release && ctest --test-dir build -C Release --output-on-failure'
-  ```
-  *(설치된 VS 버전에 따라 경로의 `18`을 `2022` 등으로 변경합니다.)*
-* 또는 Windows 시작 메뉴의 **"Developer Command Prompt for VS"** 터미널을 열면 어디서나 바로 `cmake`와 `ctest`를 사용할 수 있습니다.
+```bash
+# 1. 전체 타깃 일괄 컴파일
+cmake --build build --config Release
 
-#### Linux / macOS
-* GCC / Clang 및 CMake(3.16+)가 설치되어 있다면 위의 공통 명령어 2줄로 네이티브 바이너리가 즉시 빌드됩니다.
-* 기존 `make` 워크플로우와의 하위 호환성을 위해 `Makefile`도 함께 유지됩니다 (`make all test`).
+# 2. CTest 테스트 실행 (전체 통과 시 약 1초 소요)
+ctest --test-dir build -C Release --output-on-failure
+```
+
+> **Windows 팁 (PowerShell에서 한 줄로 테스트)**:
+> ```powershell
+> cmd.exe /c 'call "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat" && cmake -B build && cmake --build build --config Release && ctest --test-dir build -C Release --output-on-failure'
+> ```
 
 ---
 
