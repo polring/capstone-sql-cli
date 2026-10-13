@@ -222,16 +222,23 @@ SELECT city FROM customers
 
 ---
 
-## 5. 컴파일 방법
+## 5. 컴파일 방법 (CMake 통합 빌드)
 
-### Linux / macOS
+### 모든 OS 공통 (Linux, macOS, Windows)
 ```bash
-make
+# 1. 빌드 디렉터리 구성
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+
+# 2. 컴파일 및 실행 파일 생성 (build/sql-cli 또는 build/sql-cli.exe)
+cmake --build build --config Release
+
+# 3. 전체 테스트 검증 (CTest)
+ctest --test-dir build -C Release --output-on-failure
 ```
 
-### Windows (Visual Studio MSVC)
+### Windows (Visual Studio 개발자 환경이 PATH에 없는 경우)
 ```powershell
-cmd.exe /c 'call "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat" && cl.exe /O2 /W3 /D_CRT_SECURE_NO_WARNINGS /Isrc\core\include /Isrc\core\postprocessor src\cli\main.c src\core\engine\loader.c src\core\pipeline\pipeline.c src\core\postprocessor\core.c src\core\postprocessor\parser.c src\core\postprocessor\replacement.c src\core\postprocessor\schema.c /Fe:build\sql-cli.exe /Fo:build\'
+cmd.exe /c 'call "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat" && cmake -B build && cmake --build build --config Release'
 ```
 
 ---

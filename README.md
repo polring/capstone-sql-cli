@@ -45,53 +45,41 @@ CLI(콘솔) 환경과 크로스플랫폼 GUI(Uno Platform) 환경에서 동일�
 
 ---
 
-## 3. 빌드 및 테스트
+## 3. 빌드 및 테스트 (CMake 통합 빌드)
 
-### Linux (GCC & Make)
+본 프로젝트는 **CMake(`CMakeLists.txt`)**를 기반으로 **Linux, macOS, Windows 모든 플랫폼에서 동일한 명령어**로 빌드 및 테스트를 수행합니다.
+
+### 1) 빌드 (모든 OS 공통)
 ```bash
-make            # build/sql-cli 및 src/core/postprocessor 빌드
-make test       # 계약 fixture 테스트 + 오류 거부 테스트 + 후처리기 단위 테스트
-make clean
+# 1. 빌드 환경 설정 (최초 1회)
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+
+# 2. 컴파일 및 실행 파일 생성 (build/sql-cli 또는 build/sql-cli.exe 생성)
+cmake --build build --config Release
 ```
 
-Make 없이 GCC로 직접 빌드할 때:
+### 2) 전체 테스트 실행 (CTest)
+모든 회귀 테스트(후처리기 단위 테스트 17건, 오류 거부 테스트 39건, 계약 픽스처 테스트 53건)를 일괄 검증합니다:
 ```bash
-gcc -std=c11 -O2 -Wall -Wextra -Werror -Isrc/core/include -Isrc/core/postprocessor src/cli/main.c src/core/engine/loader.c src/core/pipeline/pipeline.c src/core/postprocessor/core.c src/core/postprocessor/parser.c src/core/postprocessor/replacement.c src/core/postprocessor/schema.c -lm -o build/sql-cli
+ctest --test-dir build -C Release --output-on-failure
 ```
 
-### macOS (Apple Clang & Make)
-Xcode Command Line Tools(`xcode-select --install`)가 설치된 환경에서 Apple Silicon(`arm64`) 및 Intel 네이티브 바이너리로 빌드됩니다:
-```bash
-make            # 빌드
-make test       # 테스트 실행
-```
+---
 
-Make 없이 Clang으로 직접 빌드할 때:
-```bash
-clang -std=c11 -O2 -Wall -Wextra -Werror -Isrc/core/include -Isrc/core/postprocessor src/cli/main.c src/core/engine/loader.c src/core/pipeline/pipeline.c src/core/postprocessor/core.c src/core/postprocessor/parser.c src/core/postprocessor/replacement.c src/core/postprocessor/schema.c -lm -o build/sql-cli
-```
+### 플랫폼별 참고 사항
 
-### Windows (Visual Studio / MSVC)
-일반 터미널(PowerShell/CMD)에는 `cl.exe` 컴파일러 경로가 등록되어 있지 않으므로, Visual Studio의 64비트 빌드 환경(`vcvars64.bat`)을 불러와서 컴파일합니다.
+#### Windows (Visual Studio / MSVC)
+* `cmake` 및 `ctest` 명령어가 일반 PowerShell/CMD에서 인식되지 않는 경우, Visual Studio 개발자 환경(`vcvars64.bat`)을 통해 실행합니다:
+  ```powershell
+  # PowerShell에서 한 줄로 환경 로드 및 빌드/테스트 (추천)
+  cmd.exe /c 'call "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat" && cmake -B build && cmake --build build --config Release && ctest --test-dir build -C Release --output-on-failure'
+  ```
+  *(설치된 VS 버전에 따라 경로의 `18`을 `2022` 등으로 변경합니다.)*
+* 또는 Windows 시작 메뉴의 **"Developer Command Prompt for VS"** 터미널을 열면 어디서나 바로 `cmake`와 `ctest`를 사용할 수 있습니다.
 
-**방법 1: PowerShell에서 한 줄로 환경 로드 및 빌드 (추천)**
-```powershell
-cmd.exe /c 'call "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat" && cl.exe /O2 /W3 /D_CRT_SECURE_NO_WARNINGS /Isrc\core\include /Isrc\core\postprocessor src\cli\main.c src\core\engine\loader.c src\core\pipeline\pipeline.c src\core\postprocessor\core.c src\core\postprocessor\parser.c src\core\postprocessor\replacement.c src\core\postprocessor\schema.c /Fe:build\sql-cli.exe /Fo:build\'
-```
-*(설치된 VS 버전에 따라 경로의 `18`을 `2022` 등으로 변경합니다.)*
-
-**방법 2: "Developer Command Prompt for VS" 터미널 사용**
-1. Windows 시작 메뉴에서 **"Developer Command Prompt for VS"**를 검색하여 엽니다.
-2. 프로젝트 디렉터리로 이동 후 바로 컴파일합니다:
-```cmd
-cl.exe /O2 /W3 /D_CRT_SECURE_NO_WARNINGS /Isrc\core\include /Isrc\core\postprocessor src\cli\main.c src\core\engine\loader.c src\core\pipeline\pipeline.c src\core\postprocessor\core.c src\core\postprocessor\parser.c src\core\postprocessor\replacement.c src\core\postprocessor\schema.c /Fe:build\sql-cli.exe /Fo:build\
-```
-
-**방법 3: 현재 열려 있는 PowerShell 세션에 환경 변수 불러오기**
-현재 PowerShell 창에서 아래 명령어를 한 번 실행해 두면, 이후 창을 닫기 전까지 `cl.exe ...` 명령을 바로 사용할 수 있습니다:
-```powershell
-& "C:\Program Files\Microsoft Visual Studio\18\Community\Common7\Tools\Launch-VsDevShell.ps1"
-```
+#### Linux / macOS
+* GCC / Clang 및 CMake(3.16+)가 설치되어 있다면 위의 공통 명령어 2줄로 네이티브 바이너리가 즉시 빌드됩니다.
+* 기존 `make` 워크플로우와의 하위 호환성을 위해 `Makefile`도 함께 유지됩니다 (`make all test`).
 
 ---
 
