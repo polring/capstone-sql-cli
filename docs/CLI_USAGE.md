@@ -71,19 +71,72 @@
   /set threshold <실수>  유사도 코사인 임계값 설정 (기본값: 0.5)
   /set tokens <숫자>     최대 생성 토큰 수 설정 (기본값: 32)
   /set mode <모드>       실행 모드 전환 (query, gen, post, enc)
+  /ls [경로|유형]        자산 폴더를 탐색하여 선택 가능한 모델(*.gguf), DB(*.db), 임베딩(*.bin) 목록 확인
+                         (별칭: /list, /dir, /files. 예: /ls, /ls model, /ls db, /ls embedding, /ls assets/tag)
   /status                현재 로드된 모델, DB 경로, 교정 전략, 차원, 임계값 등 상태 확인
-  /info (또는 /config, /state, /show) /status 명령어의 별칭(동일 동작)
+  /info (또는 /config, /state, /show) /status 명령어의 별칭 (동일 동작)
   /help                  사용 가능한 명령어 도움말 출력
   /exit / /quit / /q     쉘 종료
 ```
 
-### 3) 대화형 세션 예시
+### 3) 파일 탐색 및 빠른 설정 (`/ls`, `/list`)
+자산 폴더에 어떤 모델, DB, 임베딩이 있는지 확장자 기준으로 빠르게 탐색하고, 표시된 안내에 따라 `/set` 명령어로 즉시 적용할 수 있습니다.
+
 ```text
+sql-query> /ls
+=== Available Assets & Selectable Files ===
+
+  [Models (*.gguf)]
+    assets/stage1-contract2-rc1/model.gguf
+      -> /set model assets/stage1-contract2-rc1/model.gguf
+
+  [Embedding Dictionaries (*.bin)]
+    assets/stage1-contract2-rc1/semantic_dict_300d.bin (Dim: 300)
+      -> /set embedding 300
+
+  [Databases (*.db, *.sqlite)]
+    assets/stage1-contract2-rc1/shop.db
+      -> /set db assets/stage1-contract2-rc1/shop.db
+===========================================
+
+# 특정 파일 유형만 필터링
+sql-query> /ls model
+sql-query> /ls db
+sql-query> /ls embedding
+
+# 특정 하위 폴더 직접 탐색
+sql-query> /ls assets/stage1-contract2-rc1
+```
+
+### 4) 대화형 세션 예시
+```text
+sql-query> /ls
+=== Available Assets & Selectable Files ===
+  [Models (*.gguf)]
+    assets/stage1-contract2-rc1/model.gguf
+      -> /set model assets/stage1-contract2-rc1/model.gguf
+  [Databases (*.db, *.sqlite)]
+    assets/stage1-contract2-rc1/shop.db
+      -> /set db assets/stage1-contract2-rc1/shop.db
+===========================================
+
+sql-query> /set model assets/stage1-contract2-rc1/model.gguf
+Loading model: assets/stage1-contract2-rc1/model.gguf ...
+Model loaded successfully.
+
 sql-query> /set db assets/stage1-contract2-rc1/shop.db
 Database schema loaded (12 items) from assets/stage1-contract2-rc1/shop.db
 
-sql-query> /set embedding 300
-Embedding dimension set to: 300
+sql-query> /info
+--- Current Configuration ---
+  Model:       assets/stage1-contract2-rc1/model.gguf [Loaded]
+  Database:    assets/stage1-contract2-rc1/shop.db (Schema items: 12)
+  Strategy:    typo,ngram
+  Dimension:   300
+  Threshold:   0.50
+  Max Tokens:  32
+  Mode:        query
+-----------------------------
 
 sql-query> what city does ashley live in?
 [model] SELECT city FROM customers WHERE name = 'ashley' (stop=eos)

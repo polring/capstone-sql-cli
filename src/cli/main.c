@@ -37,6 +37,9 @@ static void try_configure_semantic_path(const char *path, int dim) {
 #include <io.h>
 #define IS_TERMINAL() (_isatty(_fileno(stdin)))
 #else
+#include <dirent.h>
+#include <strings.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #define IS_TERMINAL() (isatty(fileno(stdin)))
 #endif
@@ -470,6 +473,179 @@ static void print_shell_status(const char *model_path, int model_loaded,
     printf("-----------------------------\n\n");
 }
 
+#define MAX_DIR_ENTRIES 256
+
+static int has_extension(const char *filename, const char *ext) {
+    size_t flen = strlen(filename);
+    size_t elen = strlen(ext);
+    if (flen < elen) {
+        return 0;
+    }
+    const char *dot = filename + (flen - elen);
+#ifdef _WIN32
+    return _stricmp(dot, ext) == 0;
+#else
+    return strcasecmp(dot, ext) == 0;
+#endif
+}
+
+static int extract_dim_from_filename(const char *name) {
+    if (strstr(name, "50d.bin")) {
+        return 50;
+    }
+    if (strstr(name, "100d.bin")) {
+        return 100;
+    }
+    if (strstr(name, "200d.bin")) {
+        return 200;
+    }
+    if (strstr(name, "300d.bin")) {
+        return 300;
+    }
+    return 0;
+}
+
+static int list_directory_entries(const char *dir_path, char names[][256],
+                                  int is_dirs[], int max_entries) {
+    int count = 0;
+#ifdef _WIN32
+    char search_pattern[512];
+    snprintf(search_pattern, sizeof(search_pattern), "%s/*", dir_path);
+    struct _finddata_t data;
+    intptr_t h = _findfirst(search_pattern, &data);
+    if (h != -1) {
+        do {
+            if (!strcmp(data.name, ".") || !strcmp(data.name, "..")) {
+                continue;
+            }
+            if (count < max_entries) {
+                strncpy(names[count], data.name, 255);
+                names[count][255] = '\0';
+                is_dirs[count] = (data.attrib & _A_SUBDIR) ? 1 : 0;
+                count++;
+            }
+        } while (_findnext(h, &data) == 0);
+        _findclose(h);
+    }
+#else
+    DIR *d = opendir(dir_path);
+    if (d) {
+        struct dirent *ent;
+        while ((ent = readdir(d)) != NULL && count < max_entries) {
+            if (!strcmp(ent->d_name, ".") || !strcmp(ent->d_name, "..")) {
+                continue;
+            }
+            strncpy(names[count], ent->d_name, 255);
+            names[count][255] = '\0';
+            char full_path[512];
+            snprintf(full_path, sizeof(full_path), "%s/%s", dir_path, ent->d_name);
+            struct stat st;
+            is_dirs[count] = (stat(full_path, &st) == 0 && S_ISDIR(st.st_mode));
+            count++;
+        }
+        closedir(d);
+    }
+#endif
+    return count;
+}
+
+static void print_assets_in_dir(const char *dir, const char *filter, int *p_models,
+                                int *p_dbs, int *p_embs) {
+    char names[MAX_DIR_ENTRIES][256];
+    int is_dirs[MAX_DIR_ENTRIES];
+    int n = list_directory_entries(dir, names, is_dirs, MAX_DIR_ENTRIES);
+
+    int show_models = (!filter || !strcmp(filter, "all") || !strcmp(filter, "model") ||
+                       !strcmp(filter, "models"));
+    int show_dbs = (!filter || !strcmp(filter, "all") || !strcmp(filter, "db") ||
+                    !strcmp(filter, "dbs"));
+    int show_embs = (!filter || !strcmp(filter, "all") ||
+                     !strcmp(filter, "embedding") || !strcmp(filter, "embeddings") ||
+                     !strcmp(filter, "dim") || !strcmp(filter, "dims"));
+
+    for (int i = 0; i < n; i++) {
+        if (!is_dirs[i]) {
+            if (show_models && has_extension(names[i], ".gguf")) {
+                if (*p_models == 0) {
+                    printf("\n  [Models (*.gguf)]\n");
+                }
+                printf("    %s/%s\n      -> /set model %s/%s\n", dir, names[i], dir,
+                       names[i]);
+                (*p_models)++;
+            } else if (show_dbs && (has_extension(names[i], ".db") ||
+                                    has_extension(names[i], ".sqlite") ||
+                                    has_extension(names[i], ".sqlite3"))) {
+                if (*p_dbs == 0) {
+                    printf("\n  [Databases (*.db, *.sqlite)]\n");
+                }
+                printf("    %s/%s\n      -> /set db %s/%s\n", dir, names[i], dir,
+                       names[i]);
+                (*p_dbs)++;
+            } else if (show_embs && has_extension(names[i], ".bin")) {
+                int dim = extract_dim_from_filename(names[i]);
+                if (*p_embs == 0) {
+                    printf("\n  [Embedding Dictionaries (*.bin)]\n");
+                }
+                if (dim > 0) {
+                    printf("    %s/%s (Dim: %d)\n      -> /set embedding %d\n", dir,
+                           names[i], dim, dim);
+                } else {
+                    printf("    %s/%s\n", dir, names[i]);
+                }
+                (*p_embs)++;
+            }
+        }
+    }
+}
+
+static void list_available_assets(const char *arg) {
+    const char *filter = "all";
+    const char *target_dir = NULL;
+
+    if (arg && *arg) {
+        if (!strcmp(arg, "model") || !strcmp(arg, "models") || !strcmp(arg, "db") ||
+            !strcmp(arg, "dbs") || !strcmp(arg, "embedding") ||
+            !strcmp(arg, "embeddings") || !strcmp(arg, "dim") || !strcmp(arg, "dims")) {
+            filter = arg;
+        } else {
+            target_dir = arg;
+        }
+    }
+
+    printf("\n=== Available Assets & Selectable Files ===\n");
+
+    int found_models = 0, found_dbs = 0, found_embs = 0;
+
+    if (target_dir) {
+        print_assets_in_dir(target_dir, filter, &found_models, &found_dbs, &found_embs);
+    } else {
+        /* Default: scan assets/ and its subdirectories */
+        char names[MAX_DIR_ENTRIES][256];
+        int is_dirs[MAX_DIR_ENTRIES];
+        int n = list_directory_entries("assets", names, is_dirs, MAX_DIR_ENTRIES);
+        if (n > 0) {
+            print_assets_in_dir("assets", filter, &found_models, &found_dbs,
+                                &found_embs);
+            for (int i = 0; i < n; i++) {
+                if (is_dirs[i]) {
+                    char sub[512];
+                    snprintf(sub, sizeof(sub), "assets/%s", names[i]);
+                    print_assets_in_dir(sub, filter, &found_models, &found_dbs,
+                                        &found_embs);
+                }
+            }
+        }
+        /* Also check current directory */
+        print_assets_in_dir(".", filter, &found_models, &found_dbs, &found_embs);
+    }
+
+    if (found_models == 0 && found_dbs == 0 && found_embs == 0) {
+        printf("  (No matching model, database, or embedding files found in '%s')\n",
+               target_dir ? target_dir : "assets/");
+    }
+    printf("===========================================\n\n");
+}
+
 static void print_shell_help(void) {
     printf(
         "\n--- Interactive Commands ---\n"
@@ -482,6 +658,11 @@ static void print_shell_help(void) {
         "  /set threshold <float> Set semantic similarity threshold (default: 0.5)\n"
         "  /set tokens <number>   Set max new tokens to generate (default: 32)\n"
         "  /set mode <mode>       Switch mode: query (default), gen, post, enc\n"
+        "  /ls [path|type]        Inspect directory and list selectable models "
+        "(*.gguf),\n"
+        "                         databases (*.db), and embeddings (*.bin)\n"
+        "                         (Aliases: /list, /dir, /files. Examples: /ls, /ls "
+        "model, /ls assets/tag)\n"
         "  /status                Display active model, database, and configuration\n"
         "  /info (or /config, /state) Alias for /status command\n"
         "  /help                  Show this help message\n"
@@ -584,6 +765,29 @@ static void run_interactive_shell(const char *initial_model_path,
                        !strcmp(cmd, "get")) {
                 print_shell_status(model_path, model_loaded, db_path, dict_size,
                                    strategy, dim, threshold, max_tokens, mode);
+            } else if (!strcmp(cmd, "ls") || !strncmp(cmd, "ls ", 3) ||
+                       !strcmp(cmd, "list") || !strncmp(cmd, "list ", 5) ||
+                       !strcmp(cmd, "dir") || !strncmp(cmd, "dir ", 4) ||
+                       !strcmp(cmd, "files") || !strncmp(cmd, "files ", 6) ||
+                       !strcmp(cmd, "models") || !strcmp(cmd, "dbs") ||
+                       !strcmp(cmd, "embeddings") || !strcmp(cmd, "dims")) {
+                const char *arg = "";
+                if (!strncmp(cmd, "ls ", 3)) {
+                    arg = trim_string(cmd + 3);
+                } else if (!strncmp(cmd, "list ", 5)) {
+                    arg = trim_string(cmd + 5);
+                } else if (!strncmp(cmd, "dir ", 4)) {
+                    arg = trim_string(cmd + 4);
+                } else if (!strncmp(cmd, "files ", 6)) {
+                    arg = trim_string(cmd + 6);
+                } else if (!strcmp(cmd, "models")) {
+                    arg = "model";
+                } else if (!strcmp(cmd, "dbs")) {
+                    arg = "db";
+                } else if (!strcmp(cmd, "embeddings") || !strcmp(cmd, "dims")) {
+                    arg = "embedding";
+                }
+                list_available_assets(arg);
             } else if (!strncmp(cmd, "set ", 4)) {
                 char *sub = trim_string(cmd + 4);
                 if (!strncmp(sub, "db ", 3)) {
