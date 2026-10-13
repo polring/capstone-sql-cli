@@ -76,7 +76,7 @@ clang -std=c11 -O2 -Wall -Wextra -Werror -Isrc/core/include -Isrc/core/postproce
 
 **방법 1: PowerShell에서 한 줄로 환경 로드 및 빌드 (추천)**
 ```powershell
-cmd.exe /c 'call "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat" && cl.exe /O2 /W3 /D_CRT_SECURE_NO_WARNINGS /Isrc\core\include /Isrc\core\postprocessor src\cli\main.c src\core\engine\loader.c src\core\postprocessor\core.c src\core\postprocessor\parser.c src\core\postprocessor\replacement.c src\core\postprocessor\schema.c /Fe:build\sql-cli.exe /Fo:build\'
+cmd.exe /c 'call "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat" && cl.exe /O2 /W3 /D_CRT_SECURE_NO_WARNINGS /Isrc\core\include /Isrc\core\postprocessor src\cli\main.c src\core\engine\loader.c src\core\pipeline\pipeline.c src\core\postprocessor\core.c src\core\postprocessor\parser.c src\core\postprocessor\replacement.c src\core\postprocessor\schema.c /Fe:build\sql-cli.exe /Fo:build\'
 ```
 *(설치된 VS 버전에 따라 경로의 `18`을 `2022` 등으로 변경합니다.)*
 
@@ -84,7 +84,7 @@ cmd.exe /c 'call "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxil
 1. Windows 시작 메뉴에서 **"Developer Command Prompt for VS"**를 검색하여 엽니다.
 2. 프로젝트 디렉터리로 이동 후 바로 컴파일합니다:
 ```cmd
-cl.exe /O2 /W3 /D_CRT_SECURE_NO_WARNINGS /Isrc\core\include /Isrc\core\postprocessor src\cli\main.c src\core\engine\loader.c src\core\postprocessor\core.c src\core\postprocessor\parser.c src\core\postprocessor\replacement.c src\core\postprocessor\schema.c /Fe:build\sql-cli.exe /Fo:build\
+cl.exe /O2 /W3 /D_CRT_SECURE_NO_WARNINGS /Isrc\core\include /Isrc\core\postprocessor src\cli\main.c src\core\engine\loader.c src\core\pipeline\pipeline.c src\core\postprocessor\core.c src\core\postprocessor\parser.c src\core\postprocessor\replacement.c src\core\postprocessor\schema.c /Fe:build\sql-cli.exe /Fo:build\
 ```
 
 **방법 3: 현재 열려 있는 PowerShell 세션에 환경 변수 불러오기**
@@ -119,10 +119,20 @@ scripts/fetch-assets stage1-contract2-rc1 embedding
 자세한 모든 옵션 및 파라미터는 [docs/CLI_USAGE.md](docs/CLI_USAGE.md)를 참고하세요.
 
 ```bash
-# [추천 1] 대화형 REPL 쉘 실행 (모델 1회 메모리 로드 후 Zero-latency 연속 질의)
-./build/sql-cli assets/stage1-contract2-rc1/model.gguf -i
+# [추천 1] 대화형 REPL 쉘 실행 (인자 없이 실행 시 assets/ 내 모델, DB, 임베딩 자동 감지 및 로드)
+./build/sql-cli -i
+# 또는 특정 모델 지정하여 실행:
+# ./build/sql-cli assets/stage1-contract2-rc1/model.gguf -i
+
+# * 대화형 쉘 내 주요 명령어:
+#   /ls                           : 선택 가능한 모델(*.gguf), DB(*.db), 임베딩(*.bin) 목록 확인
+#   /set asset <폴더|태그>         : 지정 폴더 내 모델, DB, 임베딩 일괄 로드 (별칭: /asset)
+#   /status (또는 /info)          : 현재 로드된 모델, DB, 전략, 임계값 등 설정 상태 확인
+#   /set mode <query|gen|post|enc>: 질의 / 생성 / 후처리 / 토큰화 모드 전환
+#   /help                         : 명령어 도움말 출력, /exit: 종료
 
 # [추천 2] 일회성 질문 질의: 자연어 -> SQL 생성 -> SQLite 스키마 오타 교정
+# (배치 모드는 임의의 기본값/자동 탐색 없이 사용자가 지정한 옵션만 적용)
 ./build/sql-cli assets/stage1-contract2-rc1/model.gguf \
   --query "what city does ashley live in?" \
   --db assets/stage1-contract2-rc1/shop.db \
