@@ -119,6 +119,10 @@ Loading asset bundle from 'assets/stage1-contract2-rc1' ...
 sql-query> /ls
 === Available Assets & Selectable Files ===
 
+  [Asset Bundles (Batch Load: Model + DB + Embedding)]
+    assets/stage1-contract2-rc1
+      -> /set asset stage1-contract2-rc1  (or /asset stage1-contract2-rc1)
+
   [Models (*.gguf)]
     assets/stage1-contract2-rc1/model.gguf
       -> /set model assets/stage1-contract2-rc1/model.gguf
@@ -132,7 +136,8 @@ sql-query> /ls
       -> /set db assets/stage1-contract2-rc1/shop.db
 ===========================================
 
-# 특정 파일 유형만 필터링
+# 특정 파일/번들 유형만 필터링
+sql-query> /ls asset
 sql-query> /ls model
 sql-query> /ls db
 sql-query> /ls embedding

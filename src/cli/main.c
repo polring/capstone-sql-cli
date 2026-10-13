@@ -599,54 +599,6 @@ static void print_assets_in_dir(const char *dir, const char *filter, int *p_mode
     }
 }
 
-static void list_available_assets(const char *arg) {
-    const char *filter = "all";
-    const char *target_dir = NULL;
-
-    if (arg && *arg) {
-        if (!strcmp(arg, "model") || !strcmp(arg, "models") || !strcmp(arg, "db") ||
-            !strcmp(arg, "dbs") || !strcmp(arg, "embedding") ||
-            !strcmp(arg, "embeddings") || !strcmp(arg, "dim") || !strcmp(arg, "dims")) {
-            filter = arg;
-        } else {
-            target_dir = arg;
-        }
-    }
-
-    printf("\n=== Available Assets & Selectable Files ===\n");
-
-    int found_models = 0, found_dbs = 0, found_embs = 0;
-
-    if (target_dir) {
-        print_assets_in_dir(target_dir, filter, &found_models, &found_dbs, &found_embs);
-    } else {
-        /* Default: scan assets/ and its subdirectories */
-        char names[MAX_DIR_ENTRIES][256];
-        int is_dirs[MAX_DIR_ENTRIES];
-        int n = list_directory_entries("assets", names, is_dirs, MAX_DIR_ENTRIES);
-        if (n > 0) {
-            print_assets_in_dir("assets", filter, &found_models, &found_dbs,
-                                &found_embs);
-            for (int i = 0; i < n; i++) {
-                if (is_dirs[i]) {
-                    char sub[512];
-                    snprintf(sub, sizeof(sub), "assets/%s", names[i]);
-                    print_assets_in_dir(sub, filter, &found_models, &found_dbs,
-                                        &found_embs);
-                }
-            }
-        }
-        /* Also check current directory */
-        print_assets_in_dir(".", filter, &found_models, &found_dbs, &found_embs);
-    }
-
-    if (found_models == 0 && found_dbs == 0 && found_embs == 0) {
-        printf("  (No matching model, database, or embedding files found in '%s')\n",
-               target_dir ? target_dir : "assets/");
-    }
-    printf("===========================================\n\n");
-}
-
 static int is_directory(const char *path) {
     if (!path || !*path) {
         return 0;
@@ -664,6 +616,84 @@ static int is_directory(const char *path) {
     }
     return 0;
 #endif
+}
+
+static void list_available_assets(const char *arg) {
+    const char *filter = "all";
+    const char *target_dir = NULL;
+
+    if (arg && *arg) {
+        if (!strcmp(arg, "model") || !strcmp(arg, "models") || !strcmp(arg, "db") ||
+            !strcmp(arg, "dbs") || !strcmp(arg, "embedding") ||
+            !strcmp(arg, "embeddings") || !strcmp(arg, "dim") || !strcmp(arg, "dims") ||
+            !strcmp(arg, "asset") || !strcmp(arg, "assets")) {
+            filter = arg;
+        } else {
+            target_dir = arg;
+        }
+    }
+
+    printf("\n=== Available Assets & Selectable Files ===\n");
+
+    int show_bundles = (!filter || !strcmp(filter, "all") || !strcmp(filter, "asset") ||
+                        !strcmp(filter, "assets"));
+    int found_bundles = 0, found_models = 0, found_dbs = 0, found_embs = 0;
+
+    if (target_dir) {
+        /* If user specified a specific directory, suggest /set asset for it */
+        if (show_bundles && is_directory(target_dir)) {
+            printf("\n  [Asset Bundle (Batch Load: Model + DB + Embedding)]\n");
+            printf("    %s\n      -> /set asset %s  (or /asset %s)\n", target_dir,
+                   target_dir, target_dir);
+            found_bundles++;
+        }
+        print_assets_in_dir(target_dir, filter, &found_models, &found_dbs, &found_embs);
+    } else {
+        /* Default: scan assets/ and its subdirectories */
+        char names[MAX_DIR_ENTRIES][256];
+        int is_dirs[MAX_DIR_ENTRIES];
+        int n = list_directory_entries("assets", names, is_dirs, MAX_DIR_ENTRIES);
+
+        /* 1. Show Asset Bundles (Directories inside assets/) */
+        if (show_bundles && n > 0) {
+            for (int i = 0; i < n; i++) {
+                if (is_dirs[i]) {
+                    if (found_bundles == 0) {
+                        printf("\n  [Asset Bundles (Batch Load: Model + DB + "
+                               "Embedding)]\n");
+                    }
+                    printf("    assets/%s\n      -> /set asset %s  (or /asset %s)\n",
+                           names[i], names[i], names[i]);
+                    found_bundles++;
+                }
+            }
+        }
+
+        /* 2. Show individual files if not filtering exclusively for bundles */
+        if (strcmp(filter, "asset") != 0 && strcmp(filter, "assets") != 0) {
+            if (n > 0) {
+                print_assets_in_dir("assets", filter, &found_models, &found_dbs,
+                                    &found_embs);
+                for (int i = 0; i < n; i++) {
+                    if (is_dirs[i]) {
+                        char sub[512];
+                        snprintf(sub, sizeof(sub), "assets/%s", names[i]);
+                        print_assets_in_dir(sub, filter, &found_models, &found_dbs,
+                                            &found_embs);
+                    }
+                }
+            }
+            /* Also check current directory */
+            print_assets_in_dir(".", filter, &found_models, &found_dbs, &found_embs);
+        }
+    }
+
+    if (found_bundles == 0 && found_models == 0 && found_dbs == 0 && found_embs == 0) {
+        printf("  (No matching model, database, embedding, or asset bundle found in "
+               "'%s')\n",
+               target_dir ? target_dir : "assets/");
+    }
+    printf("===========================================\n\n");
 }
 
 static int load_asset_folder(const char *dir, Model *model, int *model_loaded,
@@ -859,11 +889,12 @@ static void print_shell_help(void) {
         "  /set threshold <float> Set semantic similarity threshold (default: 0.5)\n"
         "  /set tokens <number>   Set max new tokens to generate (default: 32)\n"
         "  /set mode <mode>       Switch mode: query (default), gen, post, enc\n"
-        "  /ls [path|type]        Inspect directory and list selectable models "
-        "(*.gguf),\n"
-        "                         databases (*.db), and embeddings (*.bin)\n"
-        "                         (Aliases: /list, /dir, /files. Examples: /ls, /ls "
-        "model, /ls assets/tag)\n"
+        "  /ls [path|type]        Inspect directory and list asset bundles (/set "
+        "asset),\n"
+        "                         models (*.gguf), databases (*.db), and embeddings "
+        "(*.bin)\n"
+        "                         (Aliases: /list, /dir, /files, /assets. Examples: "
+        "/ls, /ls asset, /ls model)\n"
         "  /status                Display active model, database, and configuration\n"
         "  /info (or /config, /state) Alias for /status command\n"
         "  /help                  Show this help message\n"
@@ -976,7 +1007,8 @@ static void run_interactive_shell(const char *initial_model_path,
                        !strcmp(cmd, "dir") || !strncmp(cmd, "dir ", 4) ||
                        !strcmp(cmd, "files") || !strncmp(cmd, "files ", 6) ||
                        !strcmp(cmd, "models") || !strcmp(cmd, "dbs") ||
-                       !strcmp(cmd, "embeddings") || !strcmp(cmd, "dims")) {
+                       !strcmp(cmd, "embeddings") || !strcmp(cmd, "dims") ||
+                       !strcmp(cmd, "assets") || !strncmp(cmd, "assets ", 7)) {
                 const char *arg = "";
                 if (!strncmp(cmd, "ls ", 3)) {
                     arg = trim_string(cmd + 3);
@@ -992,6 +1024,10 @@ static void run_interactive_shell(const char *initial_model_path,
                     arg = "db";
                 } else if (!strcmp(cmd, "embeddings") || !strcmp(cmd, "dims")) {
                     arg = "embedding";
+                } else if (!strcmp(cmd, "assets")) {
+                    arg = "asset";
+                } else if (!strncmp(cmd, "assets ", 7)) {
+                    arg = trim_string(cmd + 7);
                 }
                 list_available_assets(arg);
             } else if (!strncmp(cmd, "asset ", 6) || !strcmp(cmd, "asset")) {

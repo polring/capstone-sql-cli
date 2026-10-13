@@ -19,10 +19,12 @@ CLI(콘솔) 환경과 크로스플랫폼 GUI(Uno Platform) 환경에서 동일�
 │   ├── cli/                           # [C] 콘솔 CLI 프론트엔드 (main.c)
 │   ├── bindings/                      # [C#] Core C 라이브러리 P/Invoke 바인딩 (.NET 8)
 │   └── gui/                           # [Uno Platform] 크로스플랫폼 데스크톱 GUI (Windows, Linux, macOS)
+├── docs/                              # 상세 가이드 문서 (CLI 사용법, 후처리기 구현 가이드)
 ├── fixtures/v<N>/<세트>/              # 계약 버전별 소형 테스트 모델 및 정답 기대값 (CONTRACT.md 7절)
 ├── tests/                             # 계약 기대값 검증(fixture_test.c) 및 오류 처리 테스트(error_test.c)
 ├── scripts/fetch-assets               # 학습 저장소 Release에서 모델, DB, 임베딩 다운로드 스크립트
-├── Makefile                           # GCC/Make 기반 빌드 및 테스트 자동화 스크립트
+├── CMakeLists.txt                     # 크로스플랫폼 통합 빌드 및 CTest 명세서
+├── Makefile                           # CMake 위임 래퍼 스크립트
 └── CONTRACT.md                        # 모델 계산 및 데이터 규격 계약 문서
 ```
 

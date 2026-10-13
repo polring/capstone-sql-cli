@@ -16,14 +16,6 @@ cmake_install.cmake
 *.ilk
 *.idb
 
-# Postprocessor local build outputs
-src/core/postprocessor/postprocessor
-src/core/postprocessor/postprocessor.exe
-src/core/postprocessor/test_postprocessor
-src/core/postprocessor/test_postprocessor.exe
-src/core/postprocessor/libpostprocessor.a
-postprocessor/postprocessor
-postprocessor/test_postprocessor
 
 # .NET & Uno Platform build outputs
 bin/

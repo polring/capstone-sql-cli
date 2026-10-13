@@ -2,7 +2,7 @@
 
 학습 저장소의 Python 구현체(`src/postprocessor/python`)와 같은 알고리즘·동작을 하도록 C 언어로 작성된 핵심 라이브러리 모듈(`src/core/postprocessor/`)에 대한 설계 및 사용 설명서입니다.
 
-C 프로젝트에서 헤더를 인클루드하여 정적 라이브러리(`libpostprocessor.a`)로 링크해 사용할 수 있으며, 통합 CLI 도구(`build/sql-cli`)의 `--postprocess` 모드로 단독 실행할 수도 있습니다.
+C 프로젝트에서 헤더를 인클루드하여 정적 라이브러리(`postprocessor.lib` 또는 `libpostprocessor.a`)로 링크해 사용할 수 있으며, 통합 CLI 도구(`build/sql-cli`)의 `--postprocess` 모드로 단독 실행할 수도 있습니다.
 
 ---
 
@@ -12,13 +12,12 @@ C 프로젝트에서 헤더를 인클루드하여 정적 라이브러리(`libpos
 
 | 파일명 | 역할 설명 |
 | :--- | :--- |
-| [`postprocessor.h`](postprocessor.h) / [`../include/postprocessor.h`](../include/postprocessor.h) | 외부 공개용 C 라이브러리 인터페이스 헤더 |
-| [`core.h`](core.h) / [`core.c`](core.c) | 전체 교정 파이프라인(`process_sql`) 제어 및 오케스트레이션 |
-| [`parser.h`](parser.h) / [`parser.c`](parser.c) | SQL 예약어 사전 보정(`pre_correct_keywords`), 토크나이저 및 SQL 재구성기 |
-| [`replacement.h`](replacement.h) / [`replacement.c`](replacement.c) | Typo(difflib 비율), N-gram(Jaccard 유사도), Semantic(임베딩 코사인 유사도) 교정기 및 전략 체이닝 |
-| [`schema.h`](schema.h) / [`schema.c`](schema.c) | SQLite 데이터베이스로부터 테이블 및 컬럼 스키마 사전 로더 |
-| [`test_postprocessor.c`](test_postprocessor.c) | Python 테스트 케이스를 1:1 검증하는 C 단위 테스트 |
-| [`Makefile`](Makefile) | 정적 라이브러리(`libpostprocessor.a`) 및 테스트 바이너리 빌드 스크립트 |
+| [`postprocessor.h`](../src/core/postprocessor/postprocessor.h) / [`../include/postprocessor.h`](../src/core/include/postprocessor.h) | 외부 공개용 C 라이브러리 인터페이스 헤더 |
+| [`core.h`](../src/core/postprocessor/core.h) / [`core.c`](../src/core/postprocessor/core.c) | 전체 교정 파이프라인(`process_sql`) 제어 및 오케스트레이션 |
+| [`parser.h`](../src/core/postprocessor/parser.h) / [`parser.c`](../src/core/postprocessor/parser.c) | SQL 예약어 사전 보정(`pre_correct_keywords`), 토크나이저 및 SQL 재구성기 |
+| [`replacement.h`](../src/core/postprocessor/replacement.h) / [`replacement.c`](../src/core/postprocessor/replacement.c) | Typo(difflib 비율), N-gram(Jaccard 유사도), Semantic(임베딩 코사인 유사도) 교정기 및 전략 체이닝 |
+| [`schema.h`](../src/core/postprocessor/schema.h) / [`schema.c`](../src/core/postprocessor/schema.c) | SQLite 데이터베이스로부터 테이블 및 컬럼 스키마 사전 로더 |
+| [`test_postprocessor.c`](../src/core/postprocessor/test_postprocessor.c) | Python 테스트 케이스를 1:1 검증하는 C 단위 테스트 |
 
 ---
 
@@ -34,34 +33,39 @@ C 프로젝트에서 헤더를 인클루드하여 정적 라이브러리(`libpos
 
 3. **교정 알고리즘 (전략 및 체이닝)**:
    - **Typo**: Python `difflib.get_close_matches(word, dictionary, cutoff=0.7)`와 동일한 문자열 일치 비율($2M / (|A| + |B|)$)로 가장 유사한 사전 단어를 탐색합니다.
-   - **N-gram**: 2-gram 부분 문자열 집합을 추출하고 Python의 `set.intersection` 및 `set.union`과 동일하게 Jaccard 유사도($|A \cap B| / |A \cup B|$)를 계산(cutoff $\ge 0.3$)합니다. 단어 길이가 $N$ 미만이면 Typo로 Fallback합니다.
+   - **N-gram**: 2-gram 부분 문자열 집합을 추출하고 Python의 `set.intersection` 및 `set.union`과 동일하게 Jaccard 유사도($|A \cap B| / (|A \cup B|)$)를 계산(cutoff $\ge 0.3$)합니다. 단어 길이가 $N$ 미만이면 Typo로 Fallback합니다.
    - **Semantic**: Snake_case로 분리된 단어들의 임베딩 벡터를 Mean-pooling한 뒤 코사인 유사도로 타겟 사전을 검색합니다. 캐시가 없으면 파이프라인 오류 없이 안전하게 원래 단어를 반환합니다.
    - **전략 체이닝**: `typo,ngram,semantic`처럼 쉼표로 연결된 전략 순서대로 교정을 시도하며, 먼저 교정에 성공한 전략이 나오면 즉시 중단합니다.
 
 ---
 
-## 3. 빌드 방법
+## 3. 빌드 및 테스트 방법 (CMake)
 
-### 정적 라이브러리 빌드
+루트 `CMakeLists.txt`를 통해 프로젝트 전체와 함께 빌드됩니다:
+
+### 빌드
 ```bash
-cd src/core/postprocessor   # 또는 저장소 루트에서 make postprocessor
-make
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release
 ```
 
 빌드 산출물:
-* `libpostprocessor.a`: 다른 C 애플리케이션 및 CLI에서 링크 가능한 정적 라이브러리
+* `build/postprocessor.lib` (또는 `libpostprocessor.a`): 다른 C 애플리케이션 및 CLI에서 링크 가능한 정적 라이브러리
+* `build/test_postprocessor`: 단위 테스트 실행 파일
 
 ### C 단위 테스트 실행
 ```bash
-make test
+ctest --test-dir build -R postprocessor -C Release --output-on-failure
+# 또는 바이너리 직접 실행:
+./build/test_postprocessor
 ```
-`test_postprocessor.c`가 컴파일되어 실행되며, 파이썬 pytest와 동일한 시나리오(예약어 보정, 식별자 보정, 복합 오타, n-gram, 체이닝, semantic fallback)를 모두 검증합니다.
+Python pytest와 동일한 시나리오(예약어 보정, 식별자 보정, 복합 오타, n-gram, 체이닝, semantic fallback 등 17개 검증)를 모두 확인합니다.
 
 ---
 
 ## 4. 라이브러리로 사용하기 (`#include "postprocessor.h"`)
 
-다른 C 프로그램에서 라이브러리로 임포트하여 사용할 때는 `postprocessor.h`를 인클루드하고 `libpostprocessor.a`를 링크합니다.
+다른 C 프로그램에서 라이브러리로 임포트하여 사용할 때는 `postprocessor.h`를 인클루드하고 정적 라이브러리를 링크합니다.
 
 ### C 코드 예제:
 ```c
