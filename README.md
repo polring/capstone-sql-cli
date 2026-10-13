@@ -6,8 +6,10 @@
 
 | 경로 | 내용 |
 | --- | --- |
-| `engine/loader.c` | GGUF 로더 + forward + BPE + greedy 생성. 한 파일로 빌드된다 |
-| `postprocessor/` | 생성된 SQL의 예약어·식별자 오타 교정 라이브러리와 CLI ([README](postprocessor/README.md)) |
+| `src/core/engine/loader.c` | GGUF 로더 + forward + BPE + greedy 생성 핵심 라이브러리 |
+| `src/cli/main.c` | CLI 진입점 및 명령 분기 실행기 |
+| `src/core/postprocessor/` | 생성된 SQL의 예약어·식별자 오타 교정 라이브러리와 CLI ([README](src/core/postprocessor/README.md)) |
+| `src/core/pipeline/` | 추론과 후처리를 연결하는 통합 파이프라인 |
 | `fixtures/v<N>/<세트>/` | 계약 버전별 작은 테스트 모델과 기대값 (CONTRACT.md 7절) |
 | `tests/fixture_test.c` | fixture 기대값과 엔진 계산을 비교하는 테스트 |
 | `tests/error_test.c` | 잘못된 인자·손상된 모델 파일을 오류로 거부하는지 확인하는 테스트 |
@@ -26,7 +28,7 @@ make clean
 make 없이 엔진만 빌드할 때는 한 줄이면 된다.
 
 ```bash
-gcc -std=c11 -O2 -Wall -Wextra -Werror engine/loader.c -lm -o loader
+gcc -std=c11 -O2 -Wall -Wextra -Werror -Isrc/core/include src/cli/main.c src/core/engine/loader.c -lm -o loader
 ```
 
 ## 실행
@@ -96,8 +98,8 @@ Windows에서는 `build\loader.exe`다. `fetch-model`은 bash 스크립트라 Wi
 - 주석은 단락 평가 순서, 버퍼 범위, 수식 대응처럼 코드만으로 드러나지 않는 이유와 제약을 설명한다.
 
 ```bash
-clang-format -i engine/loader.c                     # 포맷 적용
-clang-format --dry-run --Werror engine/loader.c     # 검사만
+clang-format -i src/core/engine/loader.c src/cli/main.c                     # 포맷 적용
+clang-format --dry-run --Werror src/core/engine/loader.c src/cli/main.c     # 검사만
 ```
 
 ## 검증 기록

@@ -2,9 +2,7 @@
  * computed in Python (fixtures/v<N>/cases.txt), without needing Python here.
  * The engine is one translation unit, so it is included with main renamed.
  */
-#define main loader_cli_main
-#include "../engine/loader.c"
-#undef main
+#include "../src/core/engine/loader.c"
 
 #define LOGIT_ABSOLUTE_TOLERANCE 2e-5
 #define LOGIT_RELATIVE_TOLERANCE 2e-5

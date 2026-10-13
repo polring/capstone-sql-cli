@@ -17,4 +17,4 @@ jobs:
         run: make all test
 
       - name: Check engine formatting
-        run: clang-format --dry-run --Werror engine/loader.c tests/fixture_test.c tests/error_test.c
+        run: clang-format --dry-run --Werror src/core/engine/loader.c src/cli/main.c tests/fixture_test.c tests/error_test.c

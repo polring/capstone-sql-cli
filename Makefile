@@ -18,18 +18,22 @@ FIXTURE_DIRS = $(patsubst %/cases.txt,%,$(wildcard fixtures/v*/*/cases.txt))
 # Error cases corrupt this model at known offsets (context 32, merge_base 298).
 ERROR_FIXTURE = fixtures/v2/base/model.gguf
 
+CORE_SRCS = src/core/engine/loader.c
+CLI_SRCS = src/cli/main.c
+INCLUDES = -Isrc/core/include
+
 .PHONY: all engine postprocessor test test-fixtures test-errors test-postprocessor clean
 
 all: engine postprocessor
 
 engine: $(LOADER)
 
-$(LOADER): engine/loader.c | $(BUILD_DIR)
-	$(CC) $(CFLAGS) $< $(LDLIBS) -o $@
+$(LOADER): $(CLI_SRCS) $(CORE_SRCS) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(INCLUDES) $(CLI_SRCS) $(CORE_SRCS) $(LDLIBS) -o $@
 
-# The test includes loader.c, so the engine's CLI handlers are unused there.
-$(FIXTURE_TEST): tests/fixture_test.c engine/loader.c | $(BUILD_DIR)
-	$(CC) $(CFLAGS) -Wno-unused-function $< $(LDLIBS) -o $@
+# The test includes loader.c directly, so it needs the core source path.
+$(FIXTURE_TEST): tests/fixture_test.c $(CORE_SRCS) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(INCLUDES) -Wno-unused-function $< $(LDLIBS) -o $@
 
 $(ERROR_TEST): tests/error_test.c | $(BUILD_DIR)
 	$(CC) $(CFLAGS) $< -o $@
@@ -38,7 +42,7 @@ $(BUILD_DIR):
 	mkdir $(BUILD_DIR)
 
 postprocessor:
-	$(MAKE) -C postprocessor all
+	$(MAKE) -C src/core/postprocessor all
 
 test: test-fixtures test-errors test-postprocessor
 
@@ -49,8 +53,8 @@ test-errors: $(LOADER) $(ERROR_TEST)
 	./$(ERROR_TEST) ./$(LOADER) $(ERROR_FIXTURE) $(BUILD_DIR)
 
 test-postprocessor:
-	$(MAKE) -C postprocessor test
+	$(MAKE) -C src/core/postprocessor test
 
 clean:
-	$(MAKE) -C postprocessor clean
+	$(MAKE) -C src/core/postprocessor clean
 	rm -rf $(BUILD_DIR)
