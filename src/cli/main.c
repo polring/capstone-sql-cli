@@ -1361,14 +1361,8 @@ int main(int argc, char **argv) {
         return 0;
     }
 
-    /* 5. Check if single model argument was provided */
+    /* 5. Check if single model argument was provided without mode */
     if (argc == 2) {
-        /* If running interactively in terminal, start shell with this model */
-        if (IS_TERMINAL() && argv[1][0] != '-') {
-            run_interactive_shell(argv[1], NULL, "typo,ngram", 300, 0.5,
-                                  DEFAULT_MAX_NEW_TOKENS);
-            return 0;
-        }
         print_usage(argv[0]);
         return 2;
     }
