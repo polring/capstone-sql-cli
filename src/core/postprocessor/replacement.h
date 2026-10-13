@@ -43,6 +43,13 @@ const char *apply_correction(const char *word, const char **dictionary, size_t d
  */
 void correct_identifiers(TokenStream *stream, const char **dictionary, size_t dict_size, const char *strategy, int dim, double threshold);
 
+void set_semantic_embedding_path(const char *path);
+
+/**
+ * @brief Free allocated semantic embedding cache memory.
+ */
+void free_semantic_cache(void);
+
 #ifdef __cplusplus
 }
 #endif

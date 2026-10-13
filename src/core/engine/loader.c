@@ -1,7 +1,7 @@
 /* Standalone capstone_sql F32 GGUF engine; no external runtime libraries.
- * Keep one translation unit so the documented GCC command still works.
  * Each generation step recomputes the full prefix; there is no KV cache yet.
  */
+#include "../include/engine.h"
 #include <ctype.h>
 #include <errno.h>
 #include <limits.h>
@@ -10,10 +10,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#ifdef _WIN32
-#include <io.h>
-#include <fcntl.h>
-#endif
 
 #define MAX_ALLOCATION_BYTES ((size_t)1024 * 1024 * 1024)
 #define MAX_STRING_BYTES 1048576
@@ -22,14 +18,9 @@
 #define MAX_CONTEXT_LENGTH 4096
 #define MAX_TENSOR_COUNT 10000
 #define MAX_MERGE_ARRAY_ENTRIES 393216
-#define GGUF_VERSION 3
-/* Must match the exporter's CONTRACT_VERSION; see CONTRACT.md. */
-#define CONTRACT_VERSION 2
-#define CONTRACT_VERSION_TEXT "2"
 #define GGUF_ALIGNMENT 32
 #define REQUIRED_METADATA_COUNT 19
 #define BYTE_TOKEN_COUNT 256
-#define DEFAULT_MAX_NEW_TOKENS 32
 
 typedef enum {
     GGUF_UINT32 = 4,
@@ -58,54 +49,6 @@ typedef struct {
 } BinaryReader;
 
 typedef struct {
-    char *name;
-    uint32_t rank;
-    size_t dimensions[2];
-    size_t element_count;
-    uint64_t data_offset;
-    float *values;
-} Tensor;
-
-typedef struct {
-    uint32_t left_token_id;
-    uint32_t right_token_id;
-    uint32_t merged_token_id;
-} BpeMerge;
-
-typedef struct {
-    int vocab_size;
-    int embedding_dim;
-    int layer_count;
-    int head_count;
-    int ffn_dim;
-    int context_length;
-    float norm_epsilon;
-    float rope_theta;
-} ModelConfig;
-
-typedef struct {
-    char **seed_tokens;
-    size_t seed_count;
-    uint32_t pad_id;
-    uint32_t bos_id;
-    uint32_t eos_id;
-    uint32_t sep_id;
-    uint32_t seed_base;
-    uint32_t merge_base;
-    BpeMerge *merges;
-    size_t merge_count;
-    unsigned char **token_bytes;
-    size_t *token_byte_lengths;
-} Tokenizer;
-
-typedef struct {
-    ModelConfig config;
-    Tensor *tensors;
-    size_t tensor_count;
-    Tokenizer tokenizer;
-} Model;
-
-typedef struct {
     float *hidden_states;
     float *normalized_states;
     float *qkv_states;
@@ -124,24 +67,14 @@ typedef struct {
     const float *ffn_down;
 } BlockResidualWeights;
 
-typedef enum { CLI_LOGITS, CLI_ENCODE, CLI_GENERATE } CliMode;
-
-typedef struct {
-    CliMode mode;
-    const char *text;
-    int max_new_tokens;
-    char **token_arguments;
-    int token_argument_count;
-} CliOptions;
-
 /* ------------------------- Memory and binary reading ---------------------- */
 
-static void fail(const char *message) {
+void fail(const char *message) {
     fprintf(stderr, "error: %s\n", message);
     exit(1);
 }
 
-static void *allocate_array(size_t count, size_t element_size) {
+void *allocate_array(size_t count, size_t element_size) {
     if (element_size && count > MAX_ALLOCATION_BYTES / element_size) {
         fail("allocation exceeds 1 GiB baseline limit");
     }
@@ -706,7 +639,7 @@ static void build_token_pieces(Model *model) {
     }
 }
 
-static Model load_model(const char *path) {
+Model load_model(const char *path) {
     Model model = {0};
     BinaryReader reader = read_model_file(path);
     size_t metadata_count = read_gguf_header(&reader, &model);
@@ -1000,7 +933,7 @@ static float *compute_last_token_logits(const Model *model, int token_count,
     return logits;
 }
 
-static float *forward(const Model *model, const int *token_ids, int token_count) {
+float *forward(const Model *model, const int *token_ids, int token_count) {
     InferenceWorkspace workspace = create_workspace(&model->config, token_count);
     copy_token_embeddings(model, token_ids, token_count, workspace.hidden_states);
     for (int layer = 0; layer < model->config.layer_count; layer++) {
@@ -1017,8 +950,7 @@ static int is_word_character(unsigned char character) {
     return isalnum(character) || character == '_';
 }
 
-static void append_token_id(int *token_ids, int *token_count, int capacity,
-                            int token_id) {
+void append_token_id(int *token_ids, int *token_count, int capacity, int token_id) {
     if (*token_count >= capacity) {
         fail("context length exceeded");
     }
@@ -1124,8 +1056,7 @@ static int encode_piece(const Tokenizer *tokenizer, const char *text, size_t sta
     return piece_count;
 }
 
-static int encode_text(const Model *model, const char *text, int *token_ids,
-                       int capacity) {
+int encode_text(const Model *model, const char *text, int *token_ids, int capacity) {
     size_t text_length = strlen(text);
     validate_ascii_text(text, "baseline input supports ASCII English only");
     int token_count = 0;
@@ -1160,90 +1091,7 @@ static int encode_text(const Model *model, const char *text, int *token_ids,
     return token_count;
 }
 
-/* ----------------------- CLI parsing and mode handlers -------------------- */
-
-static int is_valid_nonnegative_integer(const char *text, const char *end, long value,
-                                        int parse_error) {
-    return !parse_error && end != text && !*end && value >= 0 && value <= INT_MAX;
-}
-
-static int parse_nonnegative_integer(const char *text) {
-    char *end;
-    errno = 0;
-    long value = strtol(text, &end, 10);
-    if (!is_valid_nonnegative_integer(text, end, value, errno)) {
-        fail("expected nonnegative integer");
-    }
-    return (int)value;
-}
-
-static int is_encode_request(int argc, char **argv) {
-    return !strcmp(argv[2], "--encode") && argc == 4;
-}
-
-static int is_generation_request(int argc, char **argv) {
-    return !strcmp(argv[2], "--generate") && (argc == 4 || argc == 5);
-}
-
-static CliOptions parse_cli_options(int argc, char **argv) {
-    CliOptions options = {0};
-    if (!strcmp(argv[2], "--logits")) {
-        options.mode = CLI_LOGITS;
-        options.token_arguments = argv + 3;
-        options.token_argument_count = argc - 3;
-    } else if (is_encode_request(argc, argv)) {
-        options.mode = CLI_ENCODE;
-        options.text = argv[3];
-    } else if (is_generation_request(argc, argv)) {
-        options.mode = CLI_GENERATE;
-        options.text = argv[3];
-        options.max_new_tokens =
-            argc == 5 ? parse_nonnegative_integer(argv[4]) : DEFAULT_MAX_NEW_TOKENS;
-    } else {
-        fail("unknown mode or invalid arguments");
-    }
-    return options;
-}
-
-static void print_usage(const char *program_name) {
-    fprintf(stderr,
-            "usage: %s MODEL.gguf --logits ID... | --encode TEXT | --generate "
-            "QUESTION [max_new_tokens]\n",
-            program_name);
-}
-
-static void run_logits_command(const Model *model, const CliOptions *options) {
-    int capacity = model->config.context_length;
-    int *token_ids = allocate_array(capacity, sizeof(int));
-    int token_count = 0;
-    for (int index = 0; index < options->token_argument_count; index++) {
-        int token_id = parse_nonnegative_integer(options->token_arguments[index]);
-        append_token_id(token_ids, &token_count, capacity, token_id);
-    }
-    if (!token_count) {
-        fail("empty token sequence");
-    }
-    float *logits = forward(model, token_ids, token_count);
-    for (int token_id = 0; token_id < model->config.vocab_size; token_id++) {
-        printf("%s%.9g", token_id ? " " : "", logits[token_id]);
-    }
-    puts("");
-    free(logits);
-    free(token_ids);
-}
-
-static void run_encode_command(const Model *model, const CliOptions *options) {
-    int capacity = model->config.context_length;
-    int *token_ids = allocate_array(capacity, sizeof(int));
-    int token_count = encode_text(model, options->text, token_ids, capacity);
-    for (int index = 0; index < token_count; index++) {
-        printf("%s%d", index ? " " : "", token_ids[index]);
-    }
-    puts("");
-    free(token_ids);
-}
-
-static char *normalize_question(const char *text) {
+char *normalize_question(const char *text) {
     char *question = allocate_array(strlen(text) + 1, 1);
     strcpy(question, text);
     for (size_t position = 0; question[position]; position++) {
@@ -1255,7 +1103,7 @@ static char *normalize_question(const char *text) {
     return question;
 }
 
-static int prepare_prompt_tokens(const Model *model, const char *text, int *token_ids) {
+int prepare_prompt_tokens(const Model *model, const char *text, int *token_ids) {
     char *question = normalize_question(text);
     int token_count = 0;
     int capacity = model->config.context_length;
@@ -1274,7 +1122,7 @@ static int is_better_generation_candidate(const Model *model, const float *logit
            logits[candidate] > logits[current];
 }
 
-static int select_next_token(const Model *model, const float *logits) {
+int select_next_token(const Model *model, const float *logits) {
     /* Start at EOS and use strict >: ties prefer EOS, then the lowest token ID.
      * PAD/BOS/SEP and unused vocab IDs have no bytes and are not emitted. */
     int next_token_id = (int)model->tokenizer.eos_id;
@@ -1288,8 +1136,8 @@ static int select_next_token(const Model *model, const float *logits) {
 
 /* Appends generated IDs after the prompt; printing is left to the caller so the
  * contract fixture test can check the same IDs without capturing stdout. */
-static const char *generate_tokens(const Model *model, int *token_ids, int *token_count,
-                                   int max_new_tokens) {
+const char *generate_tokens(const Model *model, int *token_ids, int *token_count,
+                            int max_new_tokens) {
     for (int step = 0; step < max_new_tokens; step++) {
         if (*token_count >= model->config.context_length) {
             return "context";
@@ -1306,39 +1154,6 @@ static const char *generate_tokens(const Model *model, int *token_ids, int *toke
     return "max_new_tokens";
 }
 
-static void run_generation_command(const Model *model, const CliOptions *options) {
-    int *token_ids = allocate_array(model->config.context_length, sizeof(int));
-    int prompt_count = prepare_prompt_tokens(model, options->text, token_ids);
-    int token_count = prompt_count;
-    const char *stop_reason =
-        generate_tokens(model, token_ids, &token_count, options->max_new_tokens);
-    for (int index = prompt_count; index < token_count; index++) {
-        int token_id = token_ids[index];
-        fwrite(model->tokenizer.token_bytes[token_id], 1,
-               model->tokenizer.token_byte_lengths[token_id], stdout);
-    }
-    puts("");
-    fprintf(stderr, "stop=%s (untrained weights produce arbitrary text)\n",
-            stop_reason);
-    free(token_ids);
-}
-
-static void dispatch_cli_command(const Model *model, const CliOptions *options) {
-    switch (options->mode) {
-    case CLI_LOGITS:
-        run_logits_command(model, options);
-        break;
-    case CLI_ENCODE:
-        run_encode_command(model, options);
-        break;
-    case CLI_GENERATE:
-        run_generation_command(model, options);
-        break;
-    }
-}
-
-/* -------------------------- Ownership and entry point --------------------- */
-
 static void release_tokenizer(Tokenizer *tokenizer, int vocab_size) {
     for (size_t index = 0; index < tokenizer->seed_count; index++) {
         free(tokenizer->seed_tokens[index]);
@@ -1352,28 +1167,11 @@ static void release_tokenizer(Tokenizer *tokenizer, int vocab_size) {
     free(tokenizer->token_byte_lengths);
 }
 
-static void release_model(Model *model) {
+void release_model(Model *model) {
     for (size_t index = 0; index < model->tensor_count; index++) {
         free(model->tensors[index].name);
         free(model->tensors[index].values);
     }
     free(model->tensors);
     release_tokenizer(&model->tokenizer, model->config.vocab_size);
-}
-
-int main(int argc, char **argv) {
-#ifdef _WIN32
-    /* Windows text mode must not rewrite generated token bytes as CRLF. */
-    _setmode(1, _O_BINARY);
-#endif
-    if (argc < 3) {
-        print_usage(argv[0]);
-        return 2;
-    }
-    /* Load before validating the mode to preserve CLI error ordering. */
-    Model model = load_model(argv[1]);
-    CliOptions options = parse_cli_options(argc, argv);
-    dispatch_cli_command(&model, &options);
-    release_model(&model);
-    return 0;
 }

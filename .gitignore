@@ -1,13 +1,41 @@
-# Build outputs
+# Build outputs (C / C++ & CMake)
 build/
+build-*/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
 *.o
+*.obj
 *.a
+*.lib
+*.so
+*.dylib
+*.dll
 *.exe
-postprocessor/postprocessor
-postprocessor/test_postprocessor
+*.pdb
+*.ilk
+*.idb
 
-# Downloaded release files (scripts/fetch-model)
+
+# .NET & Uno Platform build outputs
+bin/
+obj/
+[Bb]in/
+[Oo]bj/
+
+# Visual Studio & IDE files
+.vs/
+*.suo
+*.user
+*.userosv
+*.sln.docstates
+.vscode/
+
+# Downloaded release assets (scripts/fetch-assets: models, DB, embeddings)
+assets/
 models/
 
-# Semantic embedding caches used by the postprocessor
-data/
+# OS specific files
+.DS_Store
+Thumbs.db
+desktop.ini

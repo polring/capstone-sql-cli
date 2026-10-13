@@ -1,56 +1,18 @@
-CC ?= gcc
-CFLAGS ?= -std=c11 -O2 -Wall -Wextra -Werror
-LDLIBS = -lm
-BUILD_DIR = build
+# Wrapper Makefile delegating to CMake as the single source of truth
+BUILD_DIR ?= build
+CONFIG ?= Release
 
-ifeq ($(OS),Windows_NT)
-	EXE = .exe
-else
-	EXE =
-endif
+.PHONY: all engine test clean
 
-LOADER = $(BUILD_DIR)/loader$(EXE)
-FIXTURE_TEST = $(BUILD_DIR)/fixture_test$(EXE)
-ERROR_TEST = $(BUILD_DIR)/error_test$(EXE)
-# Every contract version the engine supports keeps its fixture sets here
-# (fixtures/v<N>/<set>/model.gguf + cases.txt).
-FIXTURE_DIRS = $(patsubst %/cases.txt,%,$(wildcard fixtures/v*/*/cases.txt))
-# Error cases corrupt this model at known offsets (context 32, merge_base 298).
-ERROR_FIXTURE = fixtures/v2/base/model.gguf
+all:
+	cmake -B $(BUILD_DIR) -DCMAKE_BUILD_TYPE=$(CONFIG)
+	cmake --build $(BUILD_DIR) --config $(CONFIG)
 
-.PHONY: all engine postprocessor test test-fixtures test-errors test-postprocessor clean
+engine: all
 
-all: engine postprocessor
-
-engine: $(LOADER)
-
-$(LOADER): engine/loader.c | $(BUILD_DIR)
-	$(CC) $(CFLAGS) $< $(LDLIBS) -o $@
-
-# The test includes loader.c, so the engine's CLI handlers are unused there.
-$(FIXTURE_TEST): tests/fixture_test.c engine/loader.c | $(BUILD_DIR)
-	$(CC) $(CFLAGS) -Wno-unused-function $< $(LDLIBS) -o $@
-
-$(ERROR_TEST): tests/error_test.c | $(BUILD_DIR)
-	$(CC) $(CFLAGS) $< -o $@
-
-$(BUILD_DIR):
-	mkdir $(BUILD_DIR)
-
-postprocessor:
-	$(MAKE) -C postprocessor all
-
-test: test-fixtures test-errors test-postprocessor
-
-test-fixtures: $(FIXTURE_TEST)
-	$(foreach dir,$(FIXTURE_DIRS),./$(FIXTURE_TEST) $(dir)/model.gguf $(dir)/cases.txt &&) true
-
-test-errors: $(LOADER) $(ERROR_TEST)
-	./$(ERROR_TEST) ./$(LOADER) $(ERROR_FIXTURE) $(BUILD_DIR)
-
-test-postprocessor:
-	$(MAKE) -C postprocessor test
+test: all
+	ctest --test-dir $(BUILD_DIR) -C $(CONFIG) --output-on-failure
 
 clean:
-	$(MAKE) -C postprocessor clean
+	cmake --build $(BUILD_DIR) --target clean 2>/dev/null || true
 	rm -rf $(BUILD_DIR)

@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+# Download model releases, database, and/or embeddings from the training repository.
+# Usage:
+#   scripts/fetch-assets TAG [all|model|db|embedding] [OUTPUT_DIR]
+#
+# Examples:
+#   scripts/fetch-assets stage1-contract2-rc1                # Fetches all into assets/stage1-contract2-rc1
+#   scripts/fetch-assets stage1-contract2-rc1 model          # Fetches only model.gguf and model_info.json
+#   scripts/fetch-assets stage1-contract2-rc1 db             # Fetches only shop.db
+#   scripts/fetch-assets stage1-contract2-rc1 embedding      # Fetches semantic_dict_300d.bin
+#   scripts/fetch-assets stage1-contract2-rc1 all custom/dir # Fetches all into custom/dir
+set -euo pipefail
+
+REPOSITORY="polring/capstone-design-1"
+
+usage() {
+    cat <<EOF >&2
+usage: $0 TAG [TARGET] [OUTPUT_DIR]
+
+targets:
+  all         Fetch model, database, and embedding dictionary (default)
+  model       Fetch only model.gguf, model_info.json, and checksum
+  db          Fetch only shop.db schema database
+  embedding   Fetch semantic_dict_300d.bin from release
+EOF
+    exit 2
+}
+
+if [[ $# -lt 1 || $# -gt 3 ]]; then
+    usage
+fi
+
+tag="$1"
+target="${2:-all}"
+output="${3:-assets/$tag}"
+
+# If second argument is a custom path instead of a target keyword, treat it as output dir
+if [[ "$target" != "all" && "$target" != "model" && "$target" != "db" && "$target" != "embedding" && "$target" != "emb" ]]; then
+    output="$target"
+    target="all"
+fi
+
+mkdir -p "$output"
+
+fetch_model() {
+    echo "==> Fetching Model ($tag)..."
+    for file in model.gguf model_info.json SHA256SUMS; do
+        curl -fsSL -o "$output/$file" \
+            "https://github.com/$REPOSITORY/releases/download/$tag/$file"
+    done
+    (
+        cd "$output"
+        if command -v sha256sum >/dev/null; then
+            sha256sum --ignore-missing -c SHA256SUMS 2>/dev/null || sha256sum -c SHA256SUMS
+        else
+            shasum -a 256 -c SHA256SUMS
+        fi
+    )
+    echo "Model saved to $output"
+}
+
+fetch_db() {
+    echo "==> Fetching Database ($tag)..."
+    curl -fsSL -o "$output/shop.db" \
+        "https://github.com/$REPOSITORY/releases/download/$tag/shop.db"
+    echo "Database saved to $output/shop.db"
+}
+
+fetch_embedding() {
+    echo "==> Fetching Semantic Embedding Dictionary ($tag)..."
+    EMB_FILE="semantic_dict_300d.bin"
+    echo "Downloading $EMB_FILE from release into $output..."
+    if curl -fsSL -o "$output/$EMB_FILE" \
+        "https://github.com/$REPOSITORY/releases/download/$tag/$EMB_FILE"; then
+        echo "Successfully fetched $EMB_FILE into $output"
+    else
+        echo "Warning: $EMB_FILE is not available in release '$tag'."
+    fi
+}
+
+case "$target" in
+    all)
+        fetch_model
+        fetch_db
+        fetch_embedding
+        ;;
+    model)
+        fetch_model
+        ;;
+    db)
+        fetch_db
+        ;;
+    embedding|emb)
+        fetch_embedding
+        ;;
+    *)
+        usage
+        ;;
+esac
+
+echo "Done. Target '$target' fetched successfully to $output."

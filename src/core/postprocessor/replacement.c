@@ -216,7 +216,7 @@ typedef struct {
 
 static SemanticCache g_semantic_cache = {0, 0, NULL};
 
-static void free_semantic_cache(void) {
+void free_semantic_cache(void) {
     if (g_semantic_cache.entries) {
         for (size_t i = 0; i < g_semantic_cache.count; i++) {
             if (g_semantic_cache.entries[i].word) {
@@ -299,6 +299,17 @@ static int load_semantic_bin_file(const char *path, int dim) {
     return 0;
 }
 
+static char g_custom_semantic_path[512] = "";
+
+void set_semantic_embedding_path(const char *path) {
+    if (path && *path) {
+        strncpy(g_custom_semantic_path, path, sizeof(g_custom_semantic_path) - 1);
+        g_custom_semantic_path[sizeof(g_custom_semantic_path) - 1] = '\0';
+    } else {
+        g_custom_semantic_path[0] = '\0';
+    }
+}
+
 /* Auto-search and load semantic embeddings for given dimension */
 static int ensure_semantic_cache(int dim) {
     if (dim <= 0) return -1;
@@ -308,9 +319,24 @@ static int ensure_semantic_cache(int dim) {
 
     char path_buf[512];
 
-    /* Binary cache relative to the working directory */
+    /* 1. Try explicitly configured custom path */
+    if (g_custom_semantic_path[0] != '\0') {
+        if (load_semantic_bin_file(g_custom_semantic_path, dim) == 0) {
+            return 0;
+        }
+    }
+
+    /* 2. Search candidate patterns under assets/ directory */
     const char *bin_patterns[] = {
-        "data/semantic_dict_%dd.bin"
+        "assets/stage1-contract2-rc1/semantic_dict_%dd.bin",
+        "assets/stage1-contract2/semantic_dict_%dd.bin",
+        "assets/stage2-contract2/semantic_dict_%dd.bin",
+        "assets/default/semantic_dict_%dd.bin",
+        "assets/semantic_dict_%dd.bin",
+        "models/stage1-contract2-rc1/semantic_dict_%dd.bin",
+        "models/stage1-contract2/semantic_dict_%dd.bin",
+        "models/semantic_dict_%dd.bin",
+        "semantic_dict_%dd.bin"
     };
 
     for (size_t i = 0; i < sizeof(bin_patterns) / sizeof(bin_patterns[0]); i++) {

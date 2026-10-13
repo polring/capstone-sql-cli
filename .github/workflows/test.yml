@@ -12,9 +12,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # ubuntu-latest ships gcc, make and clang-format.
-      - name: Build and test
-        run: make all test
+      - name: Build with CMake
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --config Release
+
+      - name: Run tests with CTest
+        run: ctest --test-dir build -C Release --output-on-failure
 
       - name: Check engine formatting
-        run: clang-format --dry-run --Werror engine/loader.c tests/fixture_test.c tests/error_test.c
+        run: clang-format --dry-run --Werror src/core/engine/loader.c src/cli/main.c tests/fixture_test.c tests/error_test.c

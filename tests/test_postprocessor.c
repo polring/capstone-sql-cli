@@ -11,25 +11,19 @@
 static int g_tests_passed = 0;
 static int g_tests_total = 0;
 
-#define ASSERT_TRUE(expr, msg) do { \
-    g_tests_total++; \
-    if (expr) { \
-        g_tests_passed++; \
-        printf("  [PASS] %s\n", msg); \
-    } else { \
-        printf("  [FAIL] %s (Line %d: %s)\n", msg, __LINE__, #expr); \
-    } \
-} while(0)
+#define ASSERT_TRUE(expr, msg)                                                         \
+    do {                                                                               \
+        g_tests_total++;                                                               \
+        if (expr) {                                                                    \
+            g_tests_passed++;                                                          \
+            printf("  [PASS] %s\n", msg);                                              \
+        } else {                                                                       \
+            printf("  [FAIL] %s (Line %d: %s)\n", msg, __LINE__, #expr);               \
+        }                                                                              \
+    } while (0)
 
-static const char *TEST_DICTIONARY[] = {
-    "users",
-    "user_name",
-    "email",
-    "id",
-    "name",
-    "department",
-    "manager_id"
-};
+static const char *TEST_DICTIONARY[] = {"users", "user_name",  "email",     "id",
+                                        "name",  "department", "manager_id"};
 static const size_t TEST_DICT_SIZE =
     sizeof(TEST_DICTIONARY) / sizeof(TEST_DICTIONARY[0]);
 
@@ -63,7 +57,8 @@ void test_typo_correction_identifiers(void) {
     char *result = process_sql(sql, "typo", TEST_DICTIONARY, TEST_DICT_SIZE, 0, 0.0);
     ASSERT_TRUE(result != NULL, "process_sql returns non-null");
     if (result) {
-        ASSERT_TRUE(strstr(result, "user_name") != NULL, "usr_name corrected to user_name");
+        ASSERT_TRUE(strstr(result, "user_name") != NULL,
+                    "usr_name corrected to user_name");
         ASSERT_TRUE(strstr(result, "email") != NULL, "emil corrected to email");
         free(result);
     }
@@ -75,8 +70,10 @@ void test_typo_correction_complex(void) {
     char *result = process_sql(sql, "typo", TEST_DICTIONARY, TEST_DICT_SIZE, 0, 0.0);
     ASSERT_TRUE(result != NULL, "process_sql returns non-null");
     if (result) {
-        ASSERT_TRUE(strstr(result, "manager_id") != NULL, "manger_id corrected to manager_id");
-        ASSERT_TRUE(strstr(result, "department") != NULL, "departmnt corrected to department");
+        ASSERT_TRUE(strstr(result, "manager_id") != NULL,
+                    "manger_id corrected to manager_id");
+        ASSERT_TRUE(strstr(result, "department") != NULL,
+                    "departmnt corrected to department");
         free(result);
     }
 }
@@ -87,7 +84,8 @@ void test_ngram_correction(void) {
     char *result = process_sql(sql, "ngram", TEST_DICTIONARY, TEST_DICT_SIZE, 0, 0.0);
     ASSERT_TRUE(result != NULL, "process_sql returns non-null");
     if (result) {
-        ASSERT_TRUE(strstr(result, "department") != NULL, "departmnt corrected to department via ngram");
+        ASSERT_TRUE(strstr(result, "department") != NULL,
+                    "departmnt corrected to department via ngram");
         free(result);
     }
 }
@@ -95,11 +93,14 @@ void test_ngram_correction(void) {
 void test_strategy_chaining(void) {
     printf("Running test_strategy_chaining...\n");
     const char *sql = "SELECT usr_name FROM departmnt";
-    char *result = process_sql(sql, "typo,ngram", TEST_DICTIONARY, TEST_DICT_SIZE, 0, 0.0);
+    char *result =
+        process_sql(sql, "typo,ngram", TEST_DICTIONARY, TEST_DICT_SIZE, 0, 0.0);
     ASSERT_TRUE(result != NULL, "process_sql returns non-null");
     if (result) {
-        ASSERT_TRUE(strstr(result, "user_name") != NULL, "usr_name corrected in chained strategy");
-        ASSERT_TRUE(strstr(result, "department") != NULL, "departmnt corrected in chained strategy");
+        ASSERT_TRUE(strstr(result, "user_name") != NULL,
+                    "usr_name corrected in chained strategy");
+        ASSERT_TRUE(strstr(result, "department") != NULL,
+                    "departmnt corrected in chained strategy");
         free(result);
     }
 }
@@ -107,10 +108,12 @@ void test_strategy_chaining(void) {
 void test_semantic_correction_pipeline(void) {
     printf("Running test_semantic_correction_pipeline...\n");
     const char *sql = "SELECT usr FROM users";
-    char *result = process_sql(sql, "semantic", TEST_DICTIONARY, TEST_DICT_SIZE, 300, 0.0);
+    char *result =
+        process_sql(sql, "semantic", TEST_DICTIONARY, TEST_DICT_SIZE, 300, 0.0);
     ASSERT_TRUE(result != NULL, "process_sql returns non-null");
     if (result) {
-        ASSERT_TRUE(strstr(result, "usr") != NULL || strstr(result, "user_name") != NULL,
+        ASSERT_TRUE(strstr(result, "usr") != NULL ||
+                        strstr(result, "user_name") != NULL,
                     "semantic fallback or match safely handles query");
         free(result);
     }
