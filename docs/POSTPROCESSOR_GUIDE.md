@@ -17,7 +17,7 @@ C 프로젝트에서 헤더를 인클루드하여 정적 라이브러리(`postpr
 | [`parser.h`](../src/core/postprocessor/parser.h) / [`parser.c`](../src/core/postprocessor/parser.c) | SQL 예약어 사전 보정(`pre_correct_keywords`), 토크나이저 및 SQL 재구성기 |
 | [`replacement.h`](../src/core/postprocessor/replacement.h) / [`replacement.c`](../src/core/postprocessor/replacement.c) | Typo(difflib 비율), N-gram(Jaccard 유사도), Semantic(임베딩 코사인 유사도) 교정기 및 전략 체이닝 |
 | [`schema.h`](../src/core/postprocessor/schema.h) / [`schema.c`](../src/core/postprocessor/schema.c) | SQLite 데이터베이스로부터 테이블 및 컬럼 스키마 사전 로더 |
-| [`test_postprocessor.c`](../src/core/postprocessor/test_postprocessor.c) | Python 테스트 케이스를 1:1 검증하는 C 단위 테스트 |
+| [`tests/test_postprocessor.c`](../tests/test_postprocessor.c) | Python 테스트 케이스를 1:1 검증하는 C 단위 테스트 |
 
 ---
 

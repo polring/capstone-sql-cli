@@ -73,7 +73,7 @@ endif()
 
 # 3. Postprocessor Unit Test Executable
 add_executable(test_postprocessor
-    src/core/postprocessor/test_postprocessor.c
+    tests/test_postprocessor.c
 )
 target_include_directories(test_postprocessor PRIVATE ${CORE_INCLUDE_DIRS})
 target_link_libraries(test_postprocessor PRIVATE postprocessor)
