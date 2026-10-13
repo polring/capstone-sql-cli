@@ -21,6 +21,7 @@
 #define GGUF_ALIGNMENT 32
 #define REQUIRED_METADATA_COUNT 19
 #define BYTE_TOKEN_COUNT 256
+
 typedef enum {
     GGUF_UINT32 = 4,
     GGUF_FLOAT32 = 6,
@@ -46,6 +47,7 @@ typedef struct {
     size_t size;
     size_t position;
 } BinaryReader;
+
 typedef struct {
     float *hidden_states;
     float *normalized_states;
@@ -948,8 +950,7 @@ static int is_word_character(unsigned char character) {
     return isalnum(character) || character == '_';
 }
 
-void append_token_id(int *token_ids, int *token_count, int capacity,
-                            int token_id) {
+void append_token_id(int *token_ids, int *token_count, int capacity, int token_id) {
     if (*token_count >= capacity) {
         fail("context length exceeded");
     }
@@ -1055,8 +1056,7 @@ static int encode_piece(const Tokenizer *tokenizer, const char *text, size_t sta
     return piece_count;
 }
 
-static int encode_text(const Model *model, const char *text, int *token_ids,
-                       int capacity) {
+int encode_text(const Model *model, const char *text, int *token_ids, int capacity) {
     size_t text_length = strlen(text);
     validate_ascii_text(text, "baseline input supports ASCII English only");
     int token_count = 0;
@@ -1137,7 +1137,7 @@ int select_next_token(const Model *model, const float *logits) {
 /* Appends generated IDs after the prompt; printing is left to the caller so the
  * contract fixture test can check the same IDs without capturing stdout. */
 const char *generate_tokens(const Model *model, int *token_ids, int *token_count,
-                                   int max_new_tokens) {
+                            int max_new_tokens) {
     for (int step = 0; step < max_new_tokens; step++) {
         if (*token_count >= model->config.context_length) {
             return "context";
@@ -1175,4 +1175,3 @@ void release_model(Model *model) {
     free(model->tensors);
     release_tokenizer(&model->tokenizer, model->config.vocab_size);
 }
-

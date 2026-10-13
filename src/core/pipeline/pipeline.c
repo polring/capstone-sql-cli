@@ -1,6 +1,7 @@
 #include "../include/pipeline.h"
 #include "../include/engine.h"
 #include "../postprocessor/core.h"
+#include "../postprocessor/replacement.h"
 #include "../postprocessor/schema.h"
 
 #include <stdio.h>
@@ -11,6 +12,9 @@ struct SqlPipeline {
     Model model;
     char **dictionary;
     size_t dict_size;
+    char strategy[128];
+    int dim;
+    double threshold;
 };
 
 SqlPipeline *sql_pipeline_create(const char *model_path, const char *db_path) {
@@ -23,6 +27,9 @@ SqlPipeline *sql_pipeline_create(const char *model_path, const char *db_path) {
     }
 
     pipeline->model = load_model(model_path);
+    strncpy(pipeline->strategy, "typo,ngram", sizeof(pipeline->strategy) - 1);
+    pipeline->dim = 0;
+    pipeline->threshold = 0.0;
 
     if (db_path && strlen(db_path) > 0) {
         if (load_dictionary_from_sqlite(db_path, &pipeline->dictionary,
@@ -34,6 +41,24 @@ SqlPipeline *sql_pipeline_create(const char *model_path, const char *db_path) {
     }
 
     return pipeline;
+}
+
+void sql_pipeline_set_strategy(SqlPipeline *pipeline, const char *strategy, int dim,
+                               double threshold) {
+    if (!pipeline) {
+        return;
+    }
+    if (strategy && *strategy) {
+        strncpy(pipeline->strategy, strategy, sizeof(pipeline->strategy) - 1);
+        pipeline->strategy[sizeof(pipeline->strategy) - 1] = '\0';
+    }
+    pipeline->dim = dim;
+    pipeline->threshold = threshold;
+}
+
+void sql_pipeline_set_embedding_path(SqlPipeline *pipeline, const char *path) {
+    (void)pipeline;
+    set_semantic_embedding_path(path);
 }
 
 char *sql_pipeline_run(SqlPipeline *pipeline, const char *question, int max_new_tokens,
@@ -82,13 +107,15 @@ char *sql_pipeline_run(SqlPipeline *pipeline, const char *question, int max_new_
 
     /* 후처리 실행 */
     char *processed_sql = NULL;
+    const char *strat = pipeline->strategy[0] ? pipeline->strategy : "typo,ngram";
     if (pipeline->dictionary && pipeline->dict_size > 0) {
         processed_sql =
-            process_sql(raw_sql, "typo,ngram", (const char **)pipeline->dictionary,
-                        pipeline->dict_size, 0, 0.0);
+            process_sql(raw_sql, strat, (const char **)pipeline->dictionary,
+                        pipeline->dict_size, pipeline->dim, pipeline->threshold);
     } else {
         /* 사전이 없을 경우 예약어 기본 보정 등 후처리 시도 (빈 사전) */
-        processed_sql = process_sql(raw_sql, "typo,ngram", NULL, 0, 0, 0.0);
+        processed_sql =
+            process_sql(raw_sql, strat, NULL, 0, pipeline->dim, pipeline->threshold);
     }
 
     if (!processed_sql) {
@@ -118,6 +145,7 @@ void sql_pipeline_destroy(SqlPipeline *pipeline) {
         pipeline->dictionary = NULL;
         pipeline->dict_size = 0;
     }
+    free_semantic_cache();
     free(pipeline);
 }
 

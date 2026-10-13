@@ -16,9 +16,6 @@ set(POSTPROCESSOR_SRCS
 add_library(postprocessor_lib STATIC ${POSTPROCESSOR_SRCS})
 target_include_directories(postprocessor_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
-# Standalone CLI Executable
-add_executable(postprocessor main.c)
-target_link_libraries(postprocessor PRIVATE postprocessor_lib)
 
 # Unit Test Executable
 add_executable(test_postprocessor test_postprocessor.c)

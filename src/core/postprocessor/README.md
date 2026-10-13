@@ -1,25 +1,24 @@
 # SQL Post-processor C 구현 가이드
 
-학습 저장소의 Python 구현체(`src/postprocessor/python`)와 같은 알고리즘·동작을 하도록 C 언어로 작성된 모듈(`postprocessor/`)에 대한 설계 및 사용 설명서입니다.
+학습 저장소의 Python 구현체(`src/postprocessor/python`)와 같은 알고리즘·동작을 하도록 C 언어로 작성된 핵심 라이브러리 모듈(`src/core/postprocessor/`)에 대한 설계 및 사용 설명서입니다.
 
-C 프로젝트에서 헤더를 인클루드하여 정적/동적 라이브러리로 링크해 사용할 수 있으며, CLI 바이너리로 빌드하여 단독 실행할 수도 있습니다.
+C 프로젝트에서 헤더를 인클루드하여 정적 라이브러리(`libpostprocessor.a`)로 링크해 사용할 수 있으며, 통합 CLI 도구(`build/sql-cli`)의 `--postprocess` 모드로 단독 실행할 수도 있습니다.
 
 ---
 
 ## 1. 아키텍처 및 모듈 구성
 
-모듈은 `postprocessor/` 디렉터리에 위치하며 다음 파일들로 구성되어 있습니다:
+모듈은 `src/core/postprocessor/` 디렉터리에 위치하며 다음 파일들로 구성되어 있습니다:
 
 | 파일명 | 역할 설명 |
 | :--- | :--- |
-| [`postprocessor.h`](postprocessor.h) | 외부 공개용 C 라이브러리 인터페이스 헤더 |
+| [`postprocessor.h`](postprocessor.h) / [`../include/postprocessor.h`](../include/postprocessor.h) | 외부 공개용 C 라이브러리 인터페이스 헤더 |
 | [`core.h`](core.h) / [`core.c`](core.c) | 전체 교정 파이프라인(`process_sql`) 제어 및 오케스트레이션 |
 | [`parser.h`](parser.h) / [`parser.c`](parser.c) | SQL 예약어 사전 보정(`pre_correct_keywords`), 토크나이저 및 SQL 재구성기 |
 | [`replacement.h`](replacement.h) / [`replacement.c`](replacement.c) | Typo(difflib 비율), N-gram(Jaccard 유사도), Semantic(임베딩 코사인 유사도) 교정기 및 전략 체이닝 |
 | [`schema.h`](schema.h) / [`schema.c`](schema.c) | SQLite 데이터베이스로부터 테이블 및 컬럼 스키마 사전 로더 |
-| [`main.c`](main.c) | CLI 단독 실행용 진입점 (명령줄 인수 파싱 및 실행) |
-| [`test_postprocessor.c`](test_postprocessor.c) | `tests/test_postprocessor_python.py`의 모든 테스트 케이스를 1:1 검증하는 C 단위 테스트 |
-| [`Makefile`](Makefile) | 정적 라이브러리(`libpostprocessor.a`), CLI 바이너리, 테스트 바이너리 자동 빌드 스크립트 |
+| [`test_postprocessor.c`](test_postprocessor.c) | Python 테스트 케이스를 1:1 검증하는 C 단위 테스트 |
+| [`Makefile`](Makefile) | 정적 라이브러리(`libpostprocessor.a`) 및 테스트 바이너리 빌드 스크립트 |
 
 ---
 
@@ -43,21 +42,20 @@ C 프로젝트에서 헤더를 인클루드하여 정적/동적 라이브러리�
 
 ## 3. 빌드 방법
 
-### 라이브러리 및 CLI 빌드
+### 정적 라이브러리 빌드
 ```bash
-cd postprocessor   # 또는 저장소 루트에서 make postprocessor
+cd src/core/postprocessor   # 또는 저장소 루트에서 make postprocessor
 make
 ```
 
 빌드 산출물:
-* `libpostprocessor.a`: 다른 C 애플리케이션에서 링크 가능한 정적 라이브러리
-* `postprocessor.exe` (Linux 환경: `postprocessor`): 단독 실행 가능한 CLI 바이너리
+* `libpostprocessor.a`: 다른 C 애플리케이션 및 CLI에서 링크 가능한 정적 라이브러리
 
 ### C 단위 테스트 실행
 ```bash
 make test
 ```
-`test_postprocessor.c`가 컴파일되어 실행되며, 파이썬 pytest와 동일한 7개 시나리오(예약어 보정, 식별자 보정, 복합 오타, n-gram, 체이닝, semantic fallback)를 모두 검증합니다.
+`test_postprocessor.c`가 컴파일되어 실행되며, 파이썬 pytest와 동일한 시나리오(예약어 보정, 식별자 보정, 복합 오타, n-gram, 체이닝, semantic fallback)를 모두 검증합니다.
 
 ---
 
@@ -89,62 +87,36 @@ int main(void) {
 
     /* 4. 메모리 해제 */
     free(fixed_sql);
+    free_semantic_cache();
     return 0;
 }
 ```
 
-### 컴파일 명령:
-```bash
-gcc -std=c11 -O2 my_code.c -Ipostprocessor postprocessor/libpostprocessor.a -lm -o my_code
-```
-
 ---
 
-## 5. CLI 단독 실행 도구로 사용하기
+## 5. CLI 단독 후처리 도구로 사용하기 (`sql-cli --postprocess`)
 
-빌드된 `postprocessor` 바이너리는 Python의 `main.py`와 동일한 옵션을 제공합니다.
+신경망 모델 없이 입력 SQL만 직접 교정할 때는 통합 CLI 도구인 `sql-cli`의 `--postprocess` 모드를 사용합니다.
 
-### 명령어 옵션
-```text
-Usage:
-  postprocessor -i <sql_string> [options]
-
-Options:
-  -i, --input <sql>          교정할 입력 SQL 쿼리 문자열 (필수)
-  -s, --strategy <strats>    교정 전략 (기본값: typo,ngram,semantic)
-  -b, --db <path>            스키마 사전을 추출할 SQLite 데이터베이스 경로
-  -d, --dim <50|100|200|300> Semantic 교정에 사용할 GloVe 차원
-  -t, --threshold <float>    Semantic 교정 코사인 유사도 임계값 (기본값: 0.0)
-  -h, --help                 도움말 출력
-```
-
-### 실행 예시
 ```bash
-# 1. 기본 실행 (-b 를 생략하면 실행 위치의 data/shop.db 를 찾는다. semantic_dict_<dim>d.bin 도 실행 위치의 data/ 에서 찾는다)
-./postprocessor -i "SELETC usr_name, emil FRMO users" -b "data/shop.db"
+# 1. 기본 실행 (스키마 DB 연동)
+./build/sql-cli --postprocess "SELETC usr_name, emil FRMO users" --db assets/stage1-contract2-rc1/shop.db
 
 # 2. 특정 전략만 지정하여 실행 (N-gram)
-./postprocessor -i "SELECT id FROM departmnt" -s "ngram" -b "data/shop.db"
+./build/sql-cli --postprocess "SELECT id FROM departmnt" --strategy ngram --db assets/stage1-contract2-rc1/shop.db
 
 # 3. GloVe 차원 지정하여 Semantic 전략 포함 실행
-./postprocessor -i "SELECT usr FROM users" -s "typo,ngram,semantic" -d 300 -t 0.5 -b "data/shop.db"
+./build/sql-cli --postprocess "SELECT usr FROM users" --strategy typo,ngram,semantic --dim 100 --threshold 0.5 --db assets/stage1-contract2-rc1/shop.db
 ```
 
 ---
 
 ## 6. 벡터 임베딩(Semantic) 데이터 연동 방법
 
-C 언어는 Python 전용 객체 직렬화 규격인 `.pkl` 파일을 직접 언패킹하지 못하므로, 기존 `data/semantic_dict_<dim>d.pkl`을 C 고속 바이너리 규격(`.bin`)으로 1회 변환하여 연동합니다:
+임베딩 파일(`semantic_dict_<dim>d.bin`)은 `scripts/fetch-assets` 스크립트를 통해 원격 GitHub Release에서 가져올 수 있으며, `assets/<태그명>/` 폴더에 위치합니다:
 
-### 1단계: pkl 데이터를 C 호환 바이너리로 내보내기 (1회 실행)
-```powershell
-python -m src.postprocessor.python.export_embeddings -d 300
+```bash
+# Release에서 300d 임베딩 파일 다운로드
+scripts/fetch-assets stage1-contract2-rc1 embedding
 ```
-* `data/semantic_dict_300d.pkl`의 GloVe 임베딩 벡터들이 고속 바이너리 포맷인 `data/semantic_dict_300d.bin`으로 추출됩니다.
-
-### 2단계: C postprocessor에서 의미론적(Semantic) 유사도 교정 실행
-```powershell
-.\postprocessor.exe -i "SELECT client FROM customers" -b "data\shop.db" -s "semantic" -d 300 -t 0.5
-```
-* `shop.db`의 `customers` 테이블 스키마에서 컬럼/테이블명을 읽어온 후, `client` 단어와 `customers` 간 코사인 유사도를 계산하여 교정합니다.
-
+이후 `--dim 300` 옵션을 지정하면 동일 폴더의 `semantic_dict_300d.bin`을 자동으로 탐색하여 로드합니다.

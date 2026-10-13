@@ -1,13 +1,45 @@
-# Build outputs
+# Build outputs (C / C++)
 build/
 *.o
+*.obj
 *.a
+*.lib
+*.so
+*.dylib
+*.dll
 *.exe
+*.pdb
+*.ilk
+*.idb
+
+# Postprocessor local build outputs
+src/core/postprocessor/postprocessor
+src/core/postprocessor/postprocessor.exe
+src/core/postprocessor/test_postprocessor
+src/core/postprocessor/test_postprocessor.exe
+src/core/postprocessor/libpostprocessor.a
 postprocessor/postprocessor
 postprocessor/test_postprocessor
 
-# Downloaded release files (scripts/fetch-model)
+# .NET & Uno Platform build outputs
+bin/
+obj/
+[Bb]in/
+[Oo]bj/
+
+# Visual Studio & IDE files
+.vs/
+*.suo
+*.user
+*.userosv
+*.sln.docstates
+.vscode/
+
+# Downloaded release assets (scripts/fetch-assets: models, DB, embeddings)
+assets/
 models/
 
-# Semantic embedding caches used by the postprocessor
-data/
+# OS specific files
+.DS_Store
+Thumbs.db
+desktop.ini

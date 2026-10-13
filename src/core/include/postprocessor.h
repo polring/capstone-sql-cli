@@ -102,6 +102,18 @@ int load_dictionary_from_sqlite(const char *db_path, char ***out_dictionary, siz
  */
 void free_dictionary(char **dictionary, size_t size);
 
+/**
+ * @brief Set custom file path for semantic embedding binary (.bin).
+ *
+ * @param path Path to the semantic_dict_<dim>d.bin file.
+ */
+void set_semantic_embedding_path(const char *path);
+
+/**
+ * @brief Free allocated semantic embedding cache memory.
+ */
+void free_semantic_cache(void);
+
 #ifdef __cplusplus
 }
 #endif

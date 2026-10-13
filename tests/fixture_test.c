@@ -189,6 +189,10 @@ static TestTally run_cases(const Model *model, char *cases) {
         if (next_line) {
             *next_line++ = '\0';
         }
+        char *cr = strchr(line, '\r');
+        if (cr) {
+            *cr = '\0';
+        }
         line_number++;
         if (*line && *line != '#') {
             char *fields[MAX_CASE_FIELDS];

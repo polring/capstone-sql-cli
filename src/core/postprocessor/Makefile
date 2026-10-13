@@ -12,11 +12,9 @@ endif
 SRCS = parser.c replacement.c schema.c core.c
 OBJS = $(SRCS:.c=.o)
 LIB_STATIC = libpostprocessor.a
-TARGET_CLI = postprocessor
 TEST_BIN = test_postprocessor
 
 ifeq ($(OS),Windows_NT)
-	TARGET_CLI := postprocessor.exe
 	TEST_BIN := test_postprocessor.exe
 	RM = del /Q /F
 	NULL_DEVICE = nul
@@ -27,13 +25,10 @@ endif
 
 .PHONY: all clean test
 
-all: $(LIB_STATIC) $(TARGET_CLI)
+all: $(LIB_STATIC)
 
 $(LIB_STATIC): $(OBJS)
 	ar rcs $@ $(OBJS)
-
-$(TARGET_CLI): main.c $(LIB_STATIC)
-	$(CC) $(CFLAGS) -o $@ main.c $(LIB_STATIC) $(LDFLAGS)
 
 test: $(TEST_BIN)
 	./$(TEST_BIN)
@@ -45,4 +40,4 @@ $(TEST_BIN): test_postprocessor.c $(LIB_STATIC)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 clean:
-	$(RM) $(OBJS) $(LIB_STATIC) $(TARGET_CLI) $(TEST_BIN) 2>$(NULL_DEVICE) || true
+	$(RM) $(OBJS) $(LIB_STATIC) $(TEST_BIN) 2>$(NULL_DEVICE) || true

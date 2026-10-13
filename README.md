@@ -1,117 +1,165 @@
 # capstone_sql C 추론 엔진 · SQL 후처리기
 
-영어 질문 → SQLite SQL을 생성하는 스크래치 Transformer의 C 실행부다. 외부 런타임 라이브러리 없이 학습 저장소
-([polring/capstone-design-1](https://github.com/polring/capstone-design-1))가 내보낸 GGUF 파일 하나로 동작한다. 모델 구조와 토크나이저는 파일에서 읽고, 파일에 담을 수 없는 계산 규칙은
-[CONTRACT.md](CONTRACT.md)에 있다.
+영어 자연어 질문으로부터 SQLite SQL을 생성하는 스크래치 Transformer의 C 실행 엔진 및 SQL 후처리기입니다. 
+외부 런타임 종속성 없이 학습 저장소([polring/capstone-design-1](https://github.com/polring/capstone-design-1))가 배포한 단일 GGUF 파일과 SQLite 데이터베이스(`shop.db`)로 동작합니다.
 
-| 경로 | 내용 |
-| --- | --- |
-| `src/core/engine/loader.c` | GGUF 로더 + forward + BPE + greedy 생성 핵심 라이브러리 |
-| `src/cli/main.c` | CLI 진입점 및 명령 분기 실행기 |
-| `src/core/postprocessor/` | 생성된 SQL의 예약어·식별자 오타 교정 라이브러리와 CLI ([README](src/core/postprocessor/README.md)) |
-| `src/core/pipeline/` | 추론과 후처리를 연결하는 통합 파이프라인 |
-| `fixtures/v<N>/<세트>/` | 계약 버전별 작은 테스트 모델과 기대값 (CONTRACT.md 7절) |
-| `tests/fixture_test.c` | fixture 기대값과 엔진 계산을 비교하는 테스트 |
-| `tests/error_test.c` | 잘못된 인자·손상된 모델 파일을 오류로 거부하는지 확인하는 테스트 |
-| `scripts/fetch-model` | 학습 저장소 release에서 모델을 받아 sha256 확인 |
+CLI(콘솔) 환경과 크로스플랫폼 GUI(Uno Platform) 환경에서 동일한 C 코어를 공유할 수 있도록 모듈화된 아키텍처(`src/core/`, `src/cli/`)로 구성되어 있습니다.
 
-## 빌드와 테스트
+---
 
-GCC(또는 C11 컴파일러)와 make가 필요하다. 저장소 루트에서 실행한다.
+## 1. 프로젝트 구조
 
+```text
+├── src/
+│   ├── core/                          # [C] 핵심 라이브러리 (추론 + 후처리 파이프라인)
+│   │   ├── include/                   # 공개 C API 헤더 (common.h, engine.h, pipeline.h, postprocessor.h)
+│   │   ├── engine/                    # GGUF 로더, Transformer 순전파, BPE 토크나이저
+│   │   ├── postprocessor/             # SQL 예약어 및 식별자 오타 교정 모듈
+│   │   └── pipeline/                  # 추론 -> SQL 디코딩 -> 오타 교정 원스톱 파이프라인
+│   ├── cli/                           # [C] 콘솔 CLI 프론트엔드 (main.c)
+│   ├── bindings/                      # [C#] Core C 라이브러리 P/Invoke 바인딩 (.NET 8)
+│   └── gui/                           # [Uno Platform] 크로스플랫폼 데스크톱 GUI (Windows, Linux, macOS)
+├── fixtures/v<N>/<세트>/              # 계약 버전별 소형 테스트 모델 및 정답 기대값 (CONTRACT.md 7절)
+├── tests/                             # 계약 기대값 검증(fixture_test.c) 및 오류 처리 테스트(error_test.c)
+├── scripts/fetch-assets               # 학습 저장소 Release에서 모델, DB, 임베딩 다운로드 스크립트
+├── Makefile                           # GCC/Make 기반 빌드 및 테스트 자동화 스크립트
+└── CONTRACT.md                        # 모델 계산 및 데이터 규격 계약 문서
+```
+
+---
+
+## 2. 모델 및 데이터베이스 동기화 (`model.gguf` & `shop.db`)
+
+배포 모델은 학습 저장소의 GitHub Release(태그 `stage<N>-contract<V>`, `-rc` 접미사는 시험용)에서 4종 파일 세트로 제공됩니다:
+* `model.gguf`: Transformer 가중치 및 BPE 토크나이저 메타데이터
+* `shop.db`: 모델 학습 기준이 된 SQLite 데이터베이스 (테이블/컬럼 스키마 및 레코드)
+* `model_info.json`: 모델 구조 및 하이퍼파라미터 정보
+* `SHA256SUMS`: 다운로드 무결성 검증용 체크섬
+
+### 모델과 DB가 태그별로 짝을 이루어야 하는 이유
+1. **스키마 종속성**: Transformer 모델은 특정 데이터베이스 구조(예: `stage1`의 `customers`, `items` 등)를 기준으로 SQL 변환을 학습합니다.
+2. **후처리기 오타 교정 정확도**: 후처리기는 `shop.db`로부터 테이블/컬럼명을 읽어와 단어 사전을 만듭니다. 모델 버전과 다른 구버전 DB를 연결하면 정상적으로 생성된 새 컬럼명을 오타로 오인하여 엉뚱한 단어로 잘못 교정하는 문제가 발생합니다.
+3. 따라서 `scripts/fetch-assets`는 다운로드 시 `assets/<태그명>/` 폴더를 생성하여 해당 버전의 `model.gguf`와 `shop.db`를 항상 한 쌍으로 함께 관리합니다.
+
+> **참고**: 대용량 모델(`model.gguf`)과 데이터베이스(`shop.db`)는 `.gitignore`에 등록되어 있어 Git 원격 저장소에는 올라가지 않으며, 로컬에만 보관됩니다.
+
+---
+
+## 3. 빌드 및 테스트
+
+### Linux (GCC & Make)
 ```bash
-make            # build/loader, postprocessor/ 의 라이브러리와 CLI
-make test       # fixture 테스트(지원하는 계약 버전 전부) + 오류 경로 테스트 + 후처리기 단위 테스트
+make            # build/sql-cli 및 src/core/postprocessor 빌드
+make test       # 계약 fixture 테스트 + 오류 거부 테스트 + 후처리기 단위 테스트
 make clean
 ```
 
-make 없이 엔진만 빌드할 때는 한 줄이면 된다.
-
+Make 없이 GCC로 직접 빌드할 때:
 ```bash
-gcc -std=c11 -O2 -Wall -Wextra -Werror -Isrc/core/include src/cli/main.c src/core/engine/loader.c -lm -o loader
+gcc -std=c11 -O2 -Wall -Wextra -Werror -Isrc/core/include -Isrc/core/postprocessor src/cli/main.c src/core/engine/loader.c src/core/pipeline/pipeline.c src/core/postprocessor/core.c src/core/postprocessor/parser.c src/core/postprocessor/replacement.c src/core/postprocessor/schema.c -lm -o build/sql-cli
 ```
 
-## 실행
-
+### macOS (Apple Clang & Make)
+Xcode Command Line Tools(`xcode-select --install`)가 설치된 환경에서 Apple Silicon(`arm64`) 및 Intel 네이티브 바이너리로 빌드됩니다:
 ```bash
-scripts/fetch-model stage1-contract2        # → models/stage1-contract2/ (model.gguf, shop.db, ...)
-./build/loader MODEL.gguf --generate "what city does ashley live in?" 64   # 질문 → SQL (stderr 에 종료 이유)
-./build/loader MODEL.gguf --encode "SELECT stock FROM items;"              # 토큰 ID
-./build/loader MODEL.gguf --logits 257 104 105 259                        # 마지막 위치 logits
+make            # 빌드
+make test       # 테스트 실행
 ```
 
-Windows에서는 `build\loader.exe`다. `fetch-model`은 bash 스크립트라 Windows에서는 Git Bash로 실행하거나,
-[release 페이지](https://github.com/polring/capstone-design-1/releases)에서 같은 파일을 받는다.
-
-배포 모델은 학습 저장소의 GitHub Release(태그 `stage<N>-contract<V>`, `-rc` 접미사는 시험용)에 `model.gguf`,
-`model_info.json`, `shop.db`, `SHA256SUMS`로 올라온다. 이 엔진이 지원하는 계약 버전의 태그만 쓴다.
-
-## 계약 버전이 바뀔 때
-
-1. 학습 저장소가 `CONTRACT_VERSION`을 올리고 `python -m src.export_fixtures --new-model`로 새 fixture를 만든다.
-2. 이 저장소에서 학습 저장소의 `tests/fixtures/contract/v<새 버전>/`을 `fixtures/v<새 버전>/`에 복사하고
-   (`manifest.json`의 sha256으로 확인), `Makefile`의 `ERROR_FIXTURE`와 `tests/error_test.c`의 기대 메시지도 확인한 뒤 엔진의
-   `CONTRACT_VERSION`과 계산을 고쳐 `make test`를 통과시킨다. [CONTRACT.md](CONTRACT.md)도 함께 고친다.
-3. 이 저장소가 먼저 병합된 뒤 학습 저장소가 새 버전 태그로 release를 올린다(release workflow가 이 저장소 main으로
-   생성을 확인한다).
-
-## 코드 구조
-
-처음 읽을 때는 `main` → `dispatch_cli_command` → 모드별 실행 함수를 따라가고, 생성 모드에서는
-`prepare_prompt_tokens` → `generate_tokens` → `forward` 순서로 본다. 파일 로드는 `load_model`에서 단계별 함수를
-따라간다.
-
-| 역할 | 주요 함수 |
-| --- | --- |
-| 프로그램 시작 및 정리 | `main`, `release_model`, `release_tokenizer` |
-| CLI 옵션 해석 및 분기 | `parse_cli_options`, `dispatch_cli_command` |
-| 모드별 실행 | `run_logits_command`, `run_encode_command`, `run_generation_command` |
-| 모델 파일 읽기 | `read_model_file`, `read_gguf_header`, `read_model_metadata` |
-| 텐서 로드 및 검증 | `read_tensor_descriptors`, `read_tensor_values`, `validate_model_weights` |
-| 토큰 바이트 복원 | `build_token_pieces`, `build_merged_token_piece` |
-| 질문 준비 및 토큰화 | `normalize_question`, `prepare_prompt_tokens`, `encode_text`, `encode_piece` |
-| 추론 단계 실행 | `forward`, `run_decoder_block`, `compute_last_token_logits` |
-| Attention 및 FFN | `compute_queries_keys_values`, `compute_causal_attention`, `apply_attention_residual`, `apply_ffn_residual` |
-| 다음 토큰 생성 | `generate_tokens`(ID 추가), `select_next_token` |
-| 추론 임시 메모리 | `create_workspace`, `release_workspace` |
-
-`ModelConfig`는 구조 설정, `Tokenizer`는 BPE와 토큰 바이트, `InferenceWorkspace`는 계산용 임시 버퍼를 묶는다.
-복잡한 조건은 `is_model_config_compatible`, `is_tensor_data_in_bounds`, `has_valid_merge_references` 등으로
-분리했고, 단락 평가로 잘못된 배열 접근과 0으로 나누기를 막는 순서를 유지한다.
-
-## 한계
-
-- 배치 1이고 매 생성 단계 전체 prefix를 다시 계산한다. KV cache, 샘플링, 양자화, Unicode 입력, SQL 문법 제약은 없다.
-- 파일 및 개별 할당은 1 GiB 제한, layers ≤ 256, context ≤ 4096. 할당 합계에 대한 전역 메모리 예산은 없다.
-
-## 코드 작성 기준
-
-포맷은 [.clang-format](.clang-format)(들여쓰기 공백 4칸)을 따른다.
-
-- `for`, `while`, `if`, `else`는 본문이 한 줄이어도 중괄호를 쓴다. 한 줄에 여러 실행문을 넣지 않는다.
-- 함수와 변수는 `snake_case`, 타입은 `ModelConfig`처럼 역할이 드러나는 이름, 상수는 `GGUF_ALIGNMENT`처럼
-  `UPPER_SNAKE_CASE`.
-- `nt`, `nm`, `d` 대신 `tensor_count`, `merge_count`, `embedding_dim`처럼 개수와 의미를 구분할 수 있는 이름을 쓴다.
-- 입력 파싱, 파일 읽기, 모델 계산, 출력 처리는 서로 다른 함수로 나눈다. `main()`과 상위 함수는 단계별 함수를
-  호출해 흐름을 보여준다.
-- 읽기 전용 모델과 가중치는 `const`로 표시하고, 할당한 메모리의 해제 책임은 같은 역할의 생성/해제 함수로 짝짓는다.
-- 주석은 단락 평가 순서, 버퍼 범위, 수식 대응처럼 코드만으로 드러나지 않는 이유와 제약을 설명한다.
-
+Make 없이 Clang으로 직접 빌드할 때:
 ```bash
-clang-format -i src/core/engine/loader.c src/cli/main.c                     # 포맷 적용
-clang-format --dry-run --Werror src/core/engine/loader.c src/cli/main.c     # 검사만
+clang -std=c11 -O2 -Wall -Wextra -Werror -Isrc/core/include -Isrc/core/postprocessor src/cli/main.c src/core/engine/loader.c src/core/pipeline/pipeline.c src/core/postprocessor/core.c src/core/postprocessor/parser.c src/core/postprocessor/replacement.c src/core/postprocessor/schema.c -lm -o build/sql-cli
 ```
 
-## 검증 기록
+### Windows (Visual Studio / MSVC)
+일반 터미널(PowerShell/CMD)에는 `cl.exe` 컴파일러 경로가 등록되어 있지 않으므로, Visual Studio의 64비트 빌드 환경(`vcvars64.bat`)을 불러와서 컴파일합니다.
 
-- 2026-10-03: 더미 가중치로 Python/C logits(`atol = rtol = 2e-5`), 생성 반복, EOS·문맥 종료, BPE, 잘못된 입력·파일
-  검증. 선택적 `gguf.GGUFReader`로 텐서 값을 독립 확인했다.
-- 2026-10-06: 가독성 리팩터링(위 코드 구조). C 실행이 필요한 테스트 53개는 Windows 애플리케이션 제어
-  정책(`WinError 4551`)으로 실행이 막혀 그날은 확인하지 못했다(10-07 재검증).
-- 2026-10-07: 계약 v2. seed 개수 0/2/45, 바뀐 특수 토큰 ID와 seed/merge 시작 ID, 잘못된 ID 범위·충돌·병합 참조,
-  계약 v1 거부를 검증했다. `stock_` 토큰화 불일치를 찾아 고쳤다(CONTRACT.md 4절 3번).
-- 2026-10-12: 학습 저장소에서 분리(`git filter-branch`로 `src/loader.c`·`src/postprocessor/c/` 시절 이력까지 보존).
-  Python 없이 도는 fixture 테스트(세트 4개)와 오류 경로 테스트 39개(학습 저장소 `tests/test_inference.py`,
-  `tests/test_tokenizer_contract.py`의 C 테스트에서 이전) 추가. 동점 시 특수 토큰을 건너뛰는 테스트는 옮기지 못했다. `generate_tokens`는 생성한 ID를 추가만 하고
-  출력은 `run_generation_command`가 한다(CLI 출력은 같다). 분리 전 시험 release(`stage1-contract2-rc1`)의
-  `model.gguf`로 C 엔진과 Python 추론의 SQL 일치를 확인했다.
+**방법 1: PowerShell에서 한 줄로 환경 로드 및 빌드 (추천)**
+```powershell
+cmd.exe /c 'call "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat" && cl.exe /O2 /W3 /D_CRT_SECURE_NO_WARNINGS /Isrc\core\include /Isrc\core\postprocessor src\cli\main.c src\core\engine\loader.c src\core\postprocessor\core.c src\core\postprocessor\parser.c src\core\postprocessor\replacement.c src\core\postprocessor\schema.c /Fe:build\sql-cli.exe /Fo:build\'
+```
+*(설치된 VS 버전에 따라 경로의 `18`을 `2022` 등으로 변경합니다.)*
+
+**방법 2: "Developer Command Prompt for VS" 터미널 사용**
+1. Windows 시작 메뉴에서 **"Developer Command Prompt for VS"**를 검색하여 엽니다.
+2. 프로젝트 디렉터리로 이동 후 바로 컴파일합니다:
+```cmd
+cl.exe /O2 /W3 /D_CRT_SECURE_NO_WARNINGS /Isrc\core\include /Isrc\core\postprocessor src\cli\main.c src\core\engine\loader.c src\core\postprocessor\core.c src\core\postprocessor\parser.c src\core\postprocessor\replacement.c src\core\postprocessor\schema.c /Fe:build\sql-cli.exe /Fo:build\
+```
+
+**방법 3: 현재 열려 있는 PowerShell 세션에 환경 변수 불러오기**
+현재 PowerShell 창에서 아래 명령어를 한 번 실행해 두면, 이후 창을 닫기 전까지 `cl.exe ...` 명령을 바로 사용할 수 있습니다:
+```powershell
+& "C:\Program Files\Microsoft Visual Studio\18\Community\Common7\Tools\Launch-VsDevShell.ps1"
+```
+
+---
+
+## 4. 실행 방법
+
+### 1) 모델, DB 및 임베딩 사전 가져오기 (Fetch)
+`scripts/fetch-assets` 스크립트를 통해 필요한 구성 요소만 선택적으로 다운로드하거나 전체를 일괄 업데이트할 수 있습니다:
+
+```bash
+# 전체 일괄 업데이트 (모델 + DB + 임베딩 .bin 일괄 다운로드, 기본값)
+scripts/fetch-assets stage1-contract2-rc1 all
+
+# 모델 가중치만 가져오기 (model.gguf, model_info.json, SHA256SUMS)
+scripts/fetch-assets stage1-contract2-rc1 model
+
+# SQLite 스키마 DB만 가져오기 (shop.db)
+scripts/fetch-assets stage1-contract2-rc1 db
+
+# 후처리기 유사도 임베딩 사전만 가져오기 (semantic_dict_300d.bin)
+scripts/fetch-assets stage1-contract2-rc1 embedding
+```
+
+### 2) CLI 실행 방법
+
+자세한 모든 옵션 및 파라미터는 [docs/CLI_USAGE.md](docs/CLI_USAGE.md)를 참고하세요.
+
+```bash
+# [추천 1] 대화형 REPL 쉘 실행 (모델 1회 메모리 로드 후 Zero-latency 연속 질의)
+./build/sql-cli assets/stage1-contract2-rc1/model.gguf -i
+
+# [추천 2] 일회성 질문 질의: 자연어 -> SQL 생성 -> SQLite 스키마 오타 교정
+./build/sql-cli assets/stage1-contract2-rc1/model.gguf \
+  --query "what city does ashley live in?" \
+  --db assets/stage1-contract2-rc1/shop.db \
+  --strategy typo,ngram \
+  --max-tokens 64
+
+# [단독 후처리] 모델 없이 SQL 오타 직접 교정
+./build/sql-cli --postprocess "SELETC ctiy FRMO costumers" --db assets/stage1-contract2-rc1/shop.db
+
+# 순수 모델 추론: 질문 -> 날것의 SQL 생성 (stderr에 종료 이유 출력)
+./build/sql-cli assets/stage1-contract2-rc1/model.gguf --generate "what city does ashley live in?" 64
+
+# 텍스트 BPE 토큰화 (토큰 ID 출력)
+./build/sql-cli assets/stage1-contract2-rc1/model.gguf --encode "SELECT stock FROM items;"
+
+# 주어진 토큰 시퀀스의 마지막 위치 Logits 확률 벡터 출력
+./build/sql-cli assets/stage1-contract2-rc1/model.gguf --logits 257 104 105 259
+```
+
+---
+
+## 5. 계약 버전이 바뀔 때 (Contract Migration)
+
+1. 학습 저장소에서 `CONTRACT_VERSION`을 올리고 `python -m src.export_fixtures --new-model`로 새 fixture를 생성합니다.
+2. 이 저장소의 `fixtures/v<새 버전>/`으로 복사하고(`manifest.json` 해시 확인), `Makefile`의 `ERROR_FIXTURE` 및 테스트 기대치를 확인한 뒤 C 엔진 코드를 수정해 `make test`를 통과시킵니다. [CONTRACT.md](CONTRACT.md)도 함께 개정합니다.
+3. 이 저장소가 먼저 병합된 뒤, 학습 저장소가 새 버전 태그로 GitHub Release를 발행합니다.
+
+---
+
+## 6. 코드 스타일 및 포맷 검사
+
+[.clang-format](.clang-format)(들여쓰기 4칸, LLVM 기반) 스타일을 준수합니다.
+
+```bash
+# 포맷 적용
+clang-format -i src/core/engine/loader.c src/cli/main.c
+
+# CI 검사 (GitHub Actions)
+clang-format --dry-run --Werror src/core/engine/loader.c src/cli/main.c tests/fixture_test.c tests/error_test.c
+```
