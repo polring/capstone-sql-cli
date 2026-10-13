@@ -37,13 +37,18 @@
 
 ### 2) 명시적 옵션 플래그 (Options)
 
-| 플래그 | 설명 | 기본값 | 비고 |
-| :--- | :--- | :--- | :--- |
-| **`-b`, `--db <경로>`** | 스키마 사전(테이블/컬럼명)을 로드할 SQLite `.db` 파일 경로 | 없음 | 생략 시 SQL 예약어만 기본 교정 |
-| **`-s`, `--strategy <목록>`** | 적용할 후처리 교정 전략 목록 (쉼표 구분 순서 지정) | `typo,ngram` | 사용 가능 전략: `typo`, `ngram`, `semantic` |
-| **`-d`, `--dim <값>`** | GloVe 단어 임베딩 벡터 차원 | 없음 | **`semantic` 전략 포함 시 필수** (`50`, `100`, `200`, `300` 중 택1) |
-| **`-t`, `--threshold <실수>`**| `semantic` 유사도 코사인 임계값 | `0.5` | 0.0 ~ 1.0 실수 |
-| **`--max-tokens <정수>`** | 최대 생성 토큰 수 | `32` | 양의 정수 |
+| 플래그                          | 설명                                      | 기본값          | 비고                                                         |
+| :--------------------------- | :-------------------------------------- | :----------- | :--------------------------------------------------------- |
+| **`-b`, `--db <경로>`**        | 스키마 사전(테이블/컬럼명)을 로드할 SQLite `.db` 파일 경로 | 없음           | 생략 시 SQL 예약어만 기본 교정 (배치 모드 자동 탐색 없음)             |
+| **`-s`, `--strategy <목록>`**  | 적용할 후처리 교정 전략 목록 (쉼표 구분 순서 지정)          | `typo,ngram` | 사용 가능 전략: `typo`, `ngram`, `semantic`                      |
+| **`-d`, `--dim <값>`**        | GloVe 단어 임베딩 벡터 차원                      | 없음           | **`semantic` 전략 포함 시 필수** (`50`, `100`, `200`, `300` 중 택1) |
+| **`-t`, `--threshold <실수>`** | `semantic` 유사도 코사인 임계값                  | `0.0`        | 0.0 ~ 1.0 실수 (대화형 모드는 기본값 `0.5`)                     |
+| **`--max-tokens <정수>`**      | 최대 생성 토큰 수                              | `32`         | 양의 정수                                                      |
+
+> [!NOTE]
+> **배치 모드 vs 대화형 모드 정책 차이**:
+> * **기본 CLI 한 줄 실행 (배치 모드)**: 묵시적 기본값이나 임의의 자동 탐색 없이, 사용자가 명령줄에 명시한 옵션(`--db`, `--strategy`, `--dim` 등)만 엄격히 적용됩니다 (`threshold` 기본값 `0.0`).
+> * **대화형 모드 (`-i`)**: 실행 시 `assets/` 디렉터리를 스캔하여 존재하는 자산을 자동으로 감지/기본 지정하며, `dim=300`, `threshold=0.5`가 적용되어 즉시 테스트할 수 있습니다.
 
 ---
 
@@ -51,19 +56,26 @@
 
 대화형 쉘에서는 약 120MB의 신경망 모델 가중치와 SQLite 스키마를 메모리에 한 번만 로드해 두고 유지하므로, 매 질문마다 디스크 I/O 없이 **0.05초 이내에 즉각 응답**합니다.
 
-### 1) 진입 방법
+### 1) 진입 방법 및 자산 자동 탐색 (Auto-Discovery)
 ```bash
-# 모델을 지정하고 바로 쉘 진입
-./build/sql-cli assets/stage1-contract2-rc1/model.gguf -i
-
-# 또는 인자 없이 실행 (터미널 환경에서 자동 쉘 진입)
+# 1. 인자 없이 실행 (터미널 환경에서 자동 쉘 진입 및 assets/ 폴더 내 자산 자동 로드)
 ./build/sql-cli
+
+# 2. 명시적으로 대화형 플래그 지정
+./build/sql-cli -i
+
+# 3. 특정 모델 파일을 지정하여 진입
+./build/sql-cli assets/stage1-contract2-rc1/model.gguf -i
 ```
+> [!TIP]
+> 모델/DB를 지정하지 않고 쉘을 시작하면, `assets/` 및 하위 폴더를 스캔하여 존재하는 유효 모델(`model.gguf`), DB 스키마(`shop.db`), GloVe 임베딩(`semantic_dict_300d.bin`)을 **자동으로 감지하여 즉시 사용할 수 있도록 기본 로드**합니다.
 
 ### 2) 대화형 쉘 설정 및 제어 명령어 (`/set` 등)
 명령어는 슬래시(`/`) 접두사로 입력합니다.
 
 ```text
+  /set asset <폴더|태그>   지정 폴더 내의 모델(*.gguf), DB(*.db), 임베딩(*.bin)을 일괄 로드
+                         (별칭: /asset. 예: /set asset stage1-contract2-rc1 또는 /asset <폴더>)
   /set db <경로>         SQLite 데이터베이스 스키마 사전 로드 (예: /set db shop.db)
   /set model <경로>      GGUF 신경망 모델 파일 로드 (예: /set model model.gguf)
   /set embedding <차원>  GloVe 벡터 차원 설정 (50, 100, 200, 300. 기본값: 300)
@@ -79,8 +91,29 @@
   /exit / /quit / /q     쉘 종료
 ```
 
-### 3) 파일 탐색 및 빠른 설정 (`/ls`, `/list`)
-자산 폴더에 어떤 모델, DB, 임베딩이 있는지 확장자 기준으로 빠르게 탐색하고, 표시된 안내에 따라 `/set` 명령어로 즉시 적용할 수 있습니다.
+### 3) 자산 일괄 로드 (`/set asset`, `/asset`)
+하위 폴더 이름이나 태그명 하나만 입력하면 모델, DB, 임베딩 벡터 사전을 한 번에 교체할 수 있습니다.
+
+```text
+sql-query> /set asset stage1-contract2-rc1
+Loading asset bundle from 'assets/stage1-contract2-rc1' ...
+[Asset] Loading model: assets/stage1-contract2-rc1/model.gguf ...
+[Asset] Loaded database: assets/stage1-contract2-rc1/shop.db (15 schema items)
+[Asset] Configured embedding: assets/stage1-contract2-rc1/semantic_dict_300d.bin (Dim: 300)
+
+--- Current Configuration ---
+  Model:       assets/stage1-contract2-rc1/model.gguf [Loaded]
+  Database:    assets/stage1-contract2-rc1/shop.db (Schema items: 15)
+  Strategy:    typo,ngram
+  Dimension:   300
+  Threshold:   0.50
+  Max Tokens:  32
+  Mode:        query
+-----------------------------
+```
+
+### 4) 파일 탐색 및 빠른 설정 (`/ls`, `/list`)
+자산 폴더에 어떤 모델, DB, 임베딩이 있는지 확장자 기준으로 빠르게 탐색하고, 표시된 안내에 따라 `/set` 또는 `/set asset` 명령어로 즉시 적용할 수 있습니다.
 
 ```text
 sql-query> /ls
@@ -108,29 +141,21 @@ sql-query> /ls embedding
 sql-query> /ls assets/stage1-contract2-rc1
 ```
 
-### 4) 대화형 세션 예시
+### 5) 대화형 세션 전체 예시
 ```text
-sql-query> /ls
-=== Available Assets & Selectable Files ===
-  [Models (*.gguf)]
-    assets/stage1-contract2-rc1/model.gguf
-      -> /set model assets/stage1-contract2-rc1/model.gguf
-  [Databases (*.db, *.sqlite)]
-    assets/stage1-contract2-rc1/shop.db
-      -> /set db assets/stage1-contract2-rc1/shop.db
-===========================================
+$ ./build/sql-cli -i
 
-sql-query> /set model assets/stage1-contract2-rc1/model.gguf
-Loading model: assets/stage1-contract2-rc1/model.gguf ...
-Model loaded successfully.
+======================================================================
+            SQL Engine & Post-processor Interactive Shell             
+======================================================================
+ Type your question/query or a meta-command (e.g. '/set db shop.db', '/help').
+[Auto-discovered] Loading model: assets/stage1-contract2-rc1/model.gguf ...
+[Auto-discovered] Loaded database: assets/stage1-contract2-rc1/shop.db (15 schema items)
+[Auto-discovered] Configured embedding: assets/stage1-contract2-rc1/semantic_dict_300d.bin (Dim: 300)
 
-sql-query> /set db assets/stage1-contract2-rc1/shop.db
-Database schema loaded (12 items) from assets/stage1-contract2-rc1/shop.db
-
-sql-query> /info
 --- Current Configuration ---
   Model:       assets/stage1-contract2-rc1/model.gguf [Loaded]
-  Database:    assets/stage1-contract2-rc1/shop.db (Schema items: 12)
+  Database:    assets/stage1-contract2-rc1/shop.db (Schema items: 15)
   Strategy:    typo,ngram
   Dimension:   300
   Threshold:   0.50
@@ -206,7 +231,7 @@ make
 
 ### Windows (Visual Studio MSVC)
 ```powershell
-cmd.exe /c 'call "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat" && cl.exe /O2 /W3 /D_CRT_SECURE_NO_WARNINGS /Isrc\core\include /Isrc\core\postprocessor src\cli\main.c src\core\engine\loader.c src\core\postprocessor\core.c src\core\postprocessor\parser.c src\core\postprocessor\replacement.c src\core\postprocessor\schema.c /Fe:build\sql-cli.exe /Fo:build\'
+cmd.exe /c 'call "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat" && cl.exe /O2 /W3 /D_CRT_SECURE_NO_WARNINGS /Isrc\core\include /Isrc\core\postprocessor src\cli\main.c src\core\engine\loader.c src\core\pipeline\pipeline.c src\core\postprocessor\core.c src\core\postprocessor\parser.c src\core\postprocessor\replacement.c src\core\postprocessor\schema.c /Fe:build\sql-cli.exe /Fo:build\'
 ```
 
 ---

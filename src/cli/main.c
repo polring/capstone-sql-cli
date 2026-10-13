@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 static void try_configure_semantic_path(const char *path, int dim) {
     if (!path || dim <= 0) {
@@ -136,7 +137,7 @@ static void print_usage(const char *program_name) {
             "typo,ngram,semantic. Default: typo,ngram)\n"
             "  -d, --dim <50|100|200|300> GloVe vector dimension (required when using "
             "'semantic')\n"
-            "  -t, --threshold FLOAT   Semantic similarity threshold (default: 0.5)\n"
+            "  -t, --threshold FLOAT   Semantic similarity threshold (default: 0.0)\n"
             "  --max-tokens N          Maximum new tokens to generate (default: 32)\n",
             program_name, program_name, program_name);
 }
@@ -154,7 +155,7 @@ static CliOptions parse_cli_options(int argc, char **argv) {
     CliOptions options = {0};
     options.strategy = "typo,ngram";
     options.max_new_tokens = DEFAULT_MAX_NEW_TOKENS;
-    options.threshold = 0.5;
+    options.threshold = 0.0;
 
     if (is_logits_request(argc, argv)) {
         options.mode = CLI_MODE_LOGITS;
@@ -279,7 +280,7 @@ static int run_standalone_postprocess(int argc, char **argv) {
     const char *strategy = "typo,ngram";
     int dim = 0;
     int dim_specified = 0;
-    double threshold = 0.5;
+    double threshold = 0.0;
 
     int idx = 3;
     /* Legacy positional: [db_path] [strategy] */
@@ -646,9 +647,209 @@ static void list_available_assets(const char *arg) {
     printf("===========================================\n\n");
 }
 
+static int is_directory(const char *path) {
+    if (!path || !*path) {
+        return 0;
+    }
+#ifdef _WIN32
+    struct _stat st;
+    if (_stat(path, &st) == 0) {
+        return (st.st_mode & _S_IFDIR) != 0;
+    }
+    return 0;
+#else
+    struct stat st;
+    if (stat(path, &st) == 0) {
+        return S_ISDIR(st.st_mode);
+    }
+    return 0;
+#endif
+}
+
+static int load_asset_folder(const char *dir, Model *model, int *model_loaded,
+                             char *model_path, size_t model_path_size, char *db_path,
+                             size_t db_path_size, char ***dictionary, size_t *dict_size,
+                             int *dim, int *dim_specified, int is_auto) {
+    char names[MAX_DIR_ENTRIES][256];
+    int is_dirs[MAX_DIR_ENTRIES];
+    int n = list_directory_entries(dir, names, is_dirs, MAX_DIR_ENTRIES);
+    if (n <= 0) {
+        return 0;
+    }
+
+    int found_model = 0, found_db = 0, found_emb = 0;
+
+    /* 1. Discover model (*.gguf) */
+    if (!is_auto || !*model_loaded) {
+        for (int i = 0; i < n; i++) {
+            if (!is_dirs[i] && has_extension(names[i], ".gguf")) {
+                char new_model_path[512];
+                snprintf(new_model_path, sizeof(new_model_path), "%s/%s", dir,
+                         names[i]);
+                if (*model_loaded) {
+                    release_model(model);
+                    *model_loaded = 0;
+                }
+                printf("%s Loading model: %s ...\n",
+                       is_auto ? "[Auto-discovered]" : "[Asset]", new_model_path);
+                *model = load_model(new_model_path);
+                *model_loaded = 1;
+                strncpy(model_path, new_model_path, model_path_size - 1);
+                model_path[model_path_size - 1] = '\0';
+                found_model = 1;
+                break;
+            }
+        }
+    }
+
+    /* 2. Discover database schema (*.db, *.sqlite, *.sqlite3) */
+    if (!is_auto || db_path[0] == '\0') {
+        for (int i = 0; i < n; i++) {
+            if (!is_dirs[i] &&
+                (has_extension(names[i], ".db") || has_extension(names[i], ".sqlite") ||
+                 has_extension(names[i], ".sqlite3"))) {
+                char new_db_path[512];
+                snprintf(new_db_path, sizeof(new_db_path), "%s/%s", dir, names[i]);
+                if (*dictionary) {
+                    free_dictionary(*dictionary, *dict_size);
+                    *dictionary = NULL;
+                    *dict_size = 0;
+                }
+                strncpy(db_path, new_db_path, db_path_size - 1);
+                db_path[db_path_size - 1] = '\0';
+                if (load_dictionary_from_sqlite(db_path, dictionary, dict_size) == 0) {
+                    printf("%s Loaded database: %s (%zu schema items)\n",
+                           is_auto ? "[Auto-discovered]" : "[Asset]", db_path,
+                           *dict_size);
+                } else {
+                    printf("Warning: failed to load schema from %s\n", db_path);
+                }
+                found_db = 1;
+                break;
+            }
+        }
+    }
+
+    /* 3. Discover embedding dictionary (*.bin) */
+    for (int i = 0; i < n; i++) {
+        if (!is_dirs[i] && has_extension(names[i], ".bin")) {
+            int detected_dim = extract_dim_from_filename(names[i]);
+            char bin_path[512];
+            snprintf(bin_path, sizeof(bin_path), "%s/%s", dir, names[i]);
+            set_semantic_embedding_path(bin_path);
+            if (detected_dim > 0) {
+                *dim = detected_dim;
+                *dim_specified = 1;
+            }
+            printf("%s Configured embedding: %s (Dim: %d)\n",
+                   is_auto ? "[Auto-discovered]" : "[Asset]", bin_path, *dim);
+            found_emb = 1;
+            break;
+        }
+    }
+
+    return found_model || found_db || found_emb;
+}
+
+static void auto_discover_interactive_assets(Model *model, int *model_loaded,
+                                             char *model_path, size_t model_path_size,
+                                             char *db_path, size_t db_path_size,
+                                             char ***dictionary, size_t *dict_size,
+                                             int *dim, int *dim_specified) {
+    if (*model_loaded && db_path[0] != '\0') {
+        return;
+    }
+
+    /* Check subdirectories of assets/ first */
+    char names[MAX_DIR_ENTRIES][256];
+    int is_dirs[MAX_DIR_ENTRIES];
+    int n = list_directory_entries("assets", names, is_dirs, MAX_DIR_ENTRIES);
+    if (n > 0) {
+        for (int i = 0; i < n; i++) {
+            if (is_dirs[i]) {
+                char sub_path[512];
+                snprintf(sub_path, sizeof(sub_path), "assets/%s", names[i]);
+                if (load_asset_folder(sub_path, model, model_loaded, model_path,
+                                      model_path_size, db_path, db_path_size,
+                                      dictionary, dict_size, dim, dim_specified, 1)) {
+                    return;
+                }
+            }
+        }
+        /* Check assets/ directly */
+        if (load_asset_folder("assets", model, model_loaded, model_path,
+                              model_path_size, db_path, db_path_size, dictionary,
+                              dict_size, dim, dim_specified, 1)) {
+            return;
+        }
+    }
+
+    /* Check current directory */
+    load_asset_folder(".", model, model_loaded, model_path, model_path_size, db_path,
+                      db_path_size, dictionary, dict_size, dim, dim_specified, 1);
+}
+
+static void handle_set_asset_command(const char *arg, Model *model, int *model_loaded,
+                                     char *model_path, size_t model_path_size,
+                                     char *db_path, size_t db_path_size,
+                                     char ***dictionary, size_t *dict_size, int *dim,
+                                     int *dim_specified, const char *strategy,
+                                     double threshold, int max_tokens, CliMode mode) {
+    if (!arg || !*arg) {
+        printf("\nUsage: /set asset <tag_or_directory>  (Alias: /asset <tag>)\n");
+        printf("Available asset directories:\n");
+        char names[MAX_DIR_ENTRIES][256];
+        int is_dirs[MAX_DIR_ENTRIES];
+        int n = list_directory_entries("assets", names, is_dirs, MAX_DIR_ENTRIES);
+        int found = 0;
+        for (int i = 0; i < n; i++) {
+            if (is_dirs[i]) {
+                printf("  assets/%s  (or '%s')\n", names[i], names[i]);
+                found++;
+            }
+        }
+        if (!found) {
+            printf("  (No asset directories found under 'assets/')\n");
+        }
+        printf("Tip: Use '/ls' to inspect all available files.\n\n");
+        return;
+    }
+
+    char target_dir[512] = "";
+    if (is_directory(arg)) {
+        strncpy(target_dir, arg, sizeof(target_dir) - 1);
+    } else {
+        char candidate[512];
+        snprintf(candidate, sizeof(candidate), "assets/%s", arg);
+        if (is_directory(candidate)) {
+            strncpy(target_dir, candidate, sizeof(target_dir) - 1);
+        }
+    }
+
+    if (!target_dir[0]) {
+        printf("Error: Directory '%s' (or 'assets/%s') not found.\n", arg, arg);
+        printf("Tip: Use '/ls' to check available asset folders.\n\n");
+        return;
+    }
+
+    printf("\nLoading asset bundle from '%s' ...\n", target_dir);
+    int loaded = load_asset_folder(target_dir, model, model_loaded, model_path,
+                                   model_path_size, db_path, db_path_size, dictionary,
+                                   dict_size, dim, dim_specified, 0);
+    if (!loaded) {
+        printf("Warning: No .gguf, .db, or .bin files found in '%s'.\n", target_dir);
+    }
+    print_shell_status(model_path, *model_loaded, db_path, *dict_size, strategy, *dim,
+                       threshold, max_tokens, mode);
+}
+
 static void print_shell_help(void) {
     printf(
         "\n--- Interactive Commands ---\n"
+        "  /set asset <tag|dir>   Batch load all assets (.gguf, .db, .bin) from "
+        "folder\n"
+        "                         (Alias: /asset <tag>. e.g. /set asset "
+        "stage1-contract2-rc1)\n"
         "  /set db <path>         Load SQLite database schema (e.g. /set db shop.db)\n"
         "  /set model <path>      Load GGUF neural model (e.g. /set model model.gguf)\n"
         "  /set embedding <dim>   Set GloVe vector dimension (50, 100, 200, 300. "
@@ -720,6 +921,11 @@ static void run_interactive_shell(const char *initial_model_path,
         }
     }
 
+    /* Auto-discover existing assets if not explicitly specified */
+    auto_discover_interactive_assets(&model, &model_loaded, model_path,
+                                     sizeof(model_path), db_path, sizeof(db_path),
+                                     &dictionary, &dict_size, &dim, &dim_specified);
+
     print_shell_status(model_path, model_loaded, db_path, dict_size, strategy, dim,
                        threshold, max_tokens, mode);
 
@@ -788,9 +994,24 @@ static void run_interactive_shell(const char *initial_model_path,
                     arg = "embedding";
                 }
                 list_available_assets(arg);
+            } else if (!strncmp(cmd, "asset ", 6) || !strcmp(cmd, "asset")) {
+                const char *asset_arg =
+                    trim_string(cmd + (!strncmp(cmd, "asset ", 6) ? 6 : 5));
+                handle_set_asset_command(asset_arg, &model, &model_loaded, model_path,
+                                         sizeof(model_path), db_path, sizeof(db_path),
+                                         &dictionary, &dict_size, &dim, &dim_specified,
+                                         strategy, threshold, max_tokens, mode);
             } else if (!strncmp(cmd, "set ", 4)) {
                 char *sub = trim_string(cmd + 4);
-                if (!strncmp(sub, "db ", 3)) {
+                if (!strncmp(sub, "asset ", 6) || !strcmp(sub, "asset")) {
+                    const char *asset_arg =
+                        trim_string(sub + (!strncmp(sub, "asset ", 6) ? 6 : 5));
+                    handle_set_asset_command(asset_arg, &model, &model_loaded,
+                                             model_path, sizeof(model_path), db_path,
+                                             sizeof(db_path), &dictionary, &dict_size,
+                                             &dim, &dim_specified, strategy, threshold,
+                                             max_tokens, mode);
+                } else if (!strncmp(sub, "db ", 3)) {
                     char *new_db = trim_string(sub + 3);
                     if (*new_db) {
                         if (dictionary) {
@@ -807,7 +1028,8 @@ static void run_interactive_shell(const char *initial_model_path,
                             printf("Warning: failed to load schema from %s\n", db_path);
                         }
                     } else {
-                        printf("Usage: /set db <path_to_sqlite.db>\n");
+                        printf("Usage: /set db <path_to_sqlite.db>\n"
+                               "Tip: Use '/ls db' to inspect available databases.\n");
                     }
                 } else if (!strncmp(sub, "model ", 6)) {
                     char *new_path = trim_string(sub + 6);
@@ -822,7 +1044,8 @@ static void run_interactive_shell(const char *initial_model_path,
                         model_loaded = 1;
                         printf("Model loaded successfully.\n");
                     } else {
-                        printf("Usage: /set model <path_to_model.gguf>\n");
+                        printf("Usage: /set model <path_to_model.gguf>\n"
+                               "Tip: Use '/ls model' to inspect available models.\n");
                     }
                 } else if (!strncmp(sub, "embedding ", 10) ||
                            !strncmp(sub, "emb ", 4) || !strncmp(sub, "dim ", 4)) {
@@ -835,7 +1058,8 @@ static void run_interactive_shell(const char *initial_model_path,
                         dim_specified = 1;
                         printf("Embedding dimension set to: %d\n", dim);
                     } else {
-                        printf("Invalid dimension '%s'. Choose 50, 100, 200, or 300.\n",
+                        printf("Invalid dimension '%s'. Choose 50, 100, 200, or 300.\n"
+                               "Tip: Use '/ls embedding' to inspect available files.\n",
                                val_str);
                     }
                 } else if (!strncmp(sub, "strategy ", 9) ||
@@ -886,8 +1110,9 @@ static void run_interactive_shell(const char *initial_model_path,
                                m);
                     }
                 } else {
-                    printf("Unknown setting '%s'. Supported: /set db, /set model, /set "
-                           "embedding, /set strategy, /set tokens, /set mode\n",
+                    printf("Unknown setting '%s'. Supported: /set asset, /set db, /set "
+                           "model, /set embedding, /set strategy, /set tokens, /set "
+                           "mode\n",
                            sub);
                 }
             } else if (!strncmp(cmd, "model ", 6)) {
@@ -902,6 +1127,9 @@ static void run_interactive_shell(const char *initial_model_path,
                     model = load_model(model_path);
                     model_loaded = 1;
                     printf("Model loaded successfully.\n");
+                } else {
+                    printf("Usage: /model <path_to_model.gguf>\n"
+                           "Tip: Use '/ls model' to inspect available models.\n");
                 }
             } else if (!strncmp(cmd, "db ", 3)) {
                 char *new_db = trim_string(cmd + 3);
@@ -919,6 +1147,9 @@ static void run_interactive_shell(const char *initial_model_path,
                     } else {
                         printf("Warning: failed to load schema from %s\n", db_path);
                     }
+                } else {
+                    printf("Usage: /db <path_to_sqlite.db>\n"
+                           "Tip: Use '/ls db' to inspect available databases.\n");
                 }
             } else if (!strncmp(cmd, "embedding ", 10) || !strncmp(cmd, "emb ", 4) ||
                        !strncmp(cmd, "dim ", 4)) {
@@ -931,7 +1162,9 @@ static void run_interactive_shell(const char *initial_model_path,
                     dim_specified = 1;
                     printf("Embedding dimension set to: %d\n", dim);
                 } else {
-                    printf("Invalid dimension. Choose 50, 100, 200, or 300.\n");
+                    printf("Invalid dimension '%s'. Choose 50, 100, 200, or 300.\n"
+                           "Tip: Use '/ls embedding' to inspect available files.\n",
+                           val_str);
                 }
             } else if (!strncmp(cmd, "strategy ", 9)) {
                 char *new_strat = trim_string(cmd + 9);
