@@ -42,7 +42,7 @@
 | **`-b`, `--db <경로>`** | 스키마 사전(테이블/컬럼명)을 로드할 SQLite `.db` 파일 경로 | 없음 | 생략 시 SQL 예약어만 기본 교정 |
 | **`-s`, `--strategy <목록>`** | 적용할 후처리 교정 전략 목록 (쉼표 구분 순서 지정) | `typo,ngram` | 사용 가능 전략: `typo`, `ngram`, `semantic` |
 | **`-d`, `--dim <값>`** | GloVe 단어 임베딩 벡터 차원 | 없음 | **`semantic` 전략 포함 시 필수** (`50`, `100`, `200`, `300` 중 택1) |
-| **`-t`, `--threshold <실수>`**| `semantic` 유사도 코사인 임계값 | `0.0` | 0.0 ~ 1.0 실수 |
+| **`-t`, `--threshold <실수>`**| `semantic` 유사도 코사인 임계값 | `0.5` | 0.0 ~ 1.0 실수 |
 | **`--max-tokens <정수>`** | 최대 생성 토큰 수 | `32` | 양의 정수 |
 
 ---
@@ -66,12 +66,13 @@
 ```text
   /set db <경로>         SQLite 데이터베이스 스키마 사전 로드 (예: /set db shop.db)
   /set model <경로>      GGUF 신경망 모델 파일 로드 (예: /set model model.gguf)
-  /set embedding <차원>  GloVe 벡터 차원 설정 (50, 100, 200, 300)
+  /set embedding <차원>  GloVe 벡터 차원 설정 (50, 100, 200, 300. 기본값: 300)
   /set strategy <전략>   교정 전략 목록 설정 (예: /set strategy typo,ngram,semantic)
-  /set threshold <실수>  유사도 코사인 임계값 설정 (기본값: 0.0)
+  /set threshold <실수>  유사도 코사인 임계값 설정 (기본값: 0.5)
   /set tokens <숫자>     최대 생성 토큰 수 설정 (기본값: 32)
   /set mode <모드>       실행 모드 전환 (query, gen, post, enc)
-  /status (또는 /get)    현재 로드된 모델, DB 경로, 교정 전략, 차원 등 상태 확인
+  /status                현재 로드된 모델, DB 경로, 교정 전략, 차원, 임계값 등 상태 확인
+  /info (또는 /config, /state, /show) /status 명령어의 별칭(동일 동작)
   /help                  사용 가능한 명령어 도움말 출력
   /exit / /quit / /q     쉘 종료
 ```

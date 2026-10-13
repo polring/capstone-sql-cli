@@ -133,7 +133,7 @@ static void print_usage(const char *program_name) {
             "typo,ngram,semantic. Default: typo,ngram)\n"
             "  -d, --dim <50|100|200|300> GloVe vector dimension (required when using "
             "'semantic')\n"
-            "  -t, --threshold FLOAT   Semantic similarity threshold (default: 0.0)\n"
+            "  -t, --threshold FLOAT   Semantic similarity threshold (default: 0.5)\n"
             "  --max-tokens N          Maximum new tokens to generate (default: 32)\n",
             program_name, program_name, program_name);
 }
@@ -151,7 +151,7 @@ static CliOptions parse_cli_options(int argc, char **argv) {
     CliOptions options = {0};
     options.strategy = "typo,ngram";
     options.max_new_tokens = DEFAULT_MAX_NEW_TOKENS;
-    options.threshold = 0.0;
+    options.threshold = 0.5;
 
     if (is_logits_request(argc, argv)) {
         options.mode = CLI_MODE_LOGITS;
@@ -276,7 +276,7 @@ static int run_standalone_postprocess(int argc, char **argv) {
     const char *strategy = "typo,ngram";
     int dim = 0;
     int dim_specified = 0;
-    double threshold = 0.0;
+    double threshold = 0.5;
 
     int idx = 3;
     /* Legacy positional: [db_path] [strategy] */
@@ -447,8 +447,8 @@ static void run_query_command(const Model *model, const CliOptions *options) {
 
 static void print_shell_status(const char *model_path, int model_loaded,
                                const char *db_path, size_t dict_size,
-                               const char *strategy, int dim, int max_tokens,
-                               CliMode mode) {
+                               const char *strategy, int dim, double threshold,
+                               int max_tokens, CliMode mode) {
     printf("\n--- Current Configuration ---\n");
     printf("  Model:       %s %s\n", model_path[0] ? model_path : "(none)",
            model_loaded ? "[Loaded]" : "[Not loaded]");
@@ -456,6 +456,7 @@ static void print_shell_status(const char *model_path, int model_loaded,
            dict_size);
     printf("  Strategy:    %s\n", strategy);
     printf("  Dimension:   %d\n", dim);
+    printf("  Threshold:   %.2f\n", threshold);
     printf("  Max Tokens:  %d\n", max_tokens);
     const char *mode_str = "query";
     if (mode == CLI_MODE_GENERATE) {
@@ -474,13 +475,15 @@ static void print_shell_help(void) {
         "\n--- Interactive Commands ---\n"
         "  /set db <path>         Load SQLite database schema (e.g. /set db shop.db)\n"
         "  /set model <path>      Load GGUF neural model (e.g. /set model model.gguf)\n"
-        "  /set embedding <dim>   Set GloVe vector dimension (50, 100, 200, 300)\n"
+        "  /set embedding <dim>   Set GloVe vector dimension (50, 100, 200, 300. "
+        "Default: 300)\n"
         "  /set strategy <strats> Set correction strategies (e.g. "
         "typo,ngram,semantic)\n"
-        "  /set threshold <float> Set semantic similarity threshold (default: 0.0)\n"
+        "  /set threshold <float> Set semantic similarity threshold (default: 0.5)\n"
         "  /set tokens <number>   Set max new tokens to generate (default: 32)\n"
         "  /set mode <mode>       Switch mode: query (default), gen, post, enc\n"
-        "  /status (or /get)      Display active model, database, and configuration\n"
+        "  /status                Display active model, database, and configuration\n"
+        "  /info (or /config, /state) Alias for /status command\n"
         "  /help                  Show this help message\n"
         "  /exit (or /quit, /q)   Exit the interactive shell\n"
         "----------------------------\n\n");
@@ -495,9 +498,9 @@ static void run_interactive_shell(const char *initial_model_path,
     char model_path[512] = "";
     char db_path[512] = "";
     char strategy[128] = "typo,ngram";
-    int dim = initial_dim ? initial_dim : 100;
-    int dim_specified = initial_dim ? 1 : 0;
-    double threshold = initial_threshold;
+    int dim = initial_dim ? initial_dim : 300;
+    int dim_specified = 1;
+    double threshold = initial_threshold > 0.0 ? initial_threshold : 0.5;
     int max_tokens =
         initial_max_tokens > 0 ? initial_max_tokens : DEFAULT_MAX_NEW_TOKENS;
     CliMode mode = CLI_MODE_QUERY;
@@ -537,7 +540,7 @@ static void run_interactive_shell(const char *initial_model_path,
     }
 
     print_shell_status(model_path, model_loaded, db_path, dict_size, strategy, dim,
-                       max_tokens, mode);
+                       threshold, max_tokens, mode);
 
     char input_buffer[2048];
     while (1) {
@@ -575,9 +578,12 @@ static void run_interactive_shell(const char *initial_model_path,
                 break;
             } else if (!strcmp(cmd, "help") || !strcmp(cmd, "h") || !strcmp(cmd, "?")) {
                 print_shell_help();
-            } else if (!strcmp(cmd, "status") || !strcmp(cmd, "get")) {
+            } else if (!strcmp(cmd, "status") || !strcmp(cmd, "info") ||
+                       !strcmp(cmd, "config") || !strcmp(cmd, "conf") ||
+                       !strcmp(cmd, "state") || !strcmp(cmd, "show") ||
+                       !strcmp(cmd, "get")) {
                 print_shell_status(model_path, model_loaded, db_path, dict_size,
-                                   strategy, dim, max_tokens, mode);
+                                   strategy, dim, threshold, max_tokens, mode);
             } else if (!strncmp(cmd, "set ", 4)) {
                 char *sub = trim_string(cmd + 4);
                 if (!strncmp(sub, "db ", 3)) {
@@ -887,7 +893,7 @@ int main(int argc, char **argv) {
      * usage */
     if (argc == 1) {
         if (IS_TERMINAL()) {
-            run_interactive_shell(NULL, NULL, "typo,ngram", 0, 0.0,
+            run_interactive_shell(NULL, NULL, "typo,ngram", 300, 0.5,
                                   DEFAULT_MAX_NEW_TOKENS);
             return 0;
         }
@@ -909,7 +915,7 @@ int main(int argc, char **argv) {
                 db = argv[++i];
             }
         }
-        run_interactive_shell(NULL, db, "typo,ngram", 0, 0.0, DEFAULT_MAX_NEW_TOKENS);
+        run_interactive_shell(NULL, db, "typo,ngram", 300, 0.5, DEFAULT_MAX_NEW_TOKENS);
         return 0;
     }
 
@@ -922,7 +928,7 @@ int main(int argc, char **argv) {
     if (argc == 2) {
         /* If running interactively in terminal, start shell with this model */
         if (IS_TERMINAL() && argv[1][0] != '-') {
-            run_interactive_shell(argv[1], NULL, "typo,ngram", 0, 0.0,
+            run_interactive_shell(argv[1], NULL, "typo,ngram", 300, 0.5,
                                   DEFAULT_MAX_NEW_TOKENS);
             return 0;
         }
@@ -938,7 +944,7 @@ int main(int argc, char **argv) {
                 db = argv[++i];
             }
         }
-        run_interactive_shell(argv[1], db, "typo,ngram", 0, 0.0,
+        run_interactive_shell(argv[1], db, "typo,ngram", 300, 0.5,
                               DEFAULT_MAX_NEW_TOKENS);
         return 0;
     }
