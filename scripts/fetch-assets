@@ -1,43 +1,123 @@
 #!/usr/bin/env bash
 # Download model releases, database, and/or embeddings from the training repository.
 # Usage:
-#   scripts/fetch-assets TAG [all|model|db|embedding] [OUTPUT_DIR]
+#   scripts/fetch-assets [TAG] [all|model|db|embedding] [OUTPUT_DIR]
 #
 # Examples:
-#   scripts/fetch-assets stage1-contract2-rc1                # Fetches all into assets/stage1-contract2-rc1
-#   scripts/fetch-assets stage1-contract2-rc1 model          # Fetches only model.gguf and model_info.json
-#   scripts/fetch-assets stage1-contract2-rc1 db             # Fetches only shop.db
-#   scripts/fetch-assets stage1-contract2-rc1 embedding      # Fetches semantic_dict_300d.bin
-#   scripts/fetch-assets stage1-contract2-rc1 all custom/dir # Fetches all into custom/dir
-set -euo pipefail
+#   scripts/fetch-assets                                     # Fetches latest release into assets/<latest-tag>
+#   scripts/fetch-assets latest                              # Fetches latest release into assets/<latest-tag>
+#   scripts/fetch-assets stage1-contract2                    # Fetches specific tag into assets/stage1-contract2
+#   scripts/fetch-assets stage1-contract2 model              # Fetches only model.gguf and model_info.json
+#   scripts/fetch-assets db                                  # Fetches only shop.db for latest release
+#   scripts/fetch-assets stage1-contract2 all custom/dir     # Fetches all into custom/dir
+set -eu
+set -o pipefail 2>/dev/null || true
 
 REPOSITORY="polring/capstone-design-1"
 
 usage() {
+    local code="${1:-0}"
     cat <<EOF >&2
-usage: $0 TAG [TARGET] [OUTPUT_DIR]
+usage: $0 [TAG] [TARGET] [OUTPUT_DIR]
 
 targets:
   all         Fetch model, database, and embedding dictionary (default)
   model       Fetch only model.gguf, model_info.json, and checksum
   db          Fetch only shop.db schema database
   embedding   Fetch semantic_dict_300d.bin from release
+
+If TAG is omitted, 'latest', or a target keyword, the newest release tag
+(1. highest stage, 2. highest contract, 3. exact contract name) is automatically
+resolved from GitHub releases.
 EOF
-    exit 2
+    exit "$code"
 }
 
-if [[ $# -lt 1 || $# -gt 3 ]]; then
-    usage
+get_latest_tag() {
+    echo "==> Resolving latest release tag from GitHub ($REPOSITORY)..." >&2
+    local tag=""
+    local raw_tags=""
+    if command -v curl >/dev/null 2>&1; then
+        raw_tags=$(curl -fsSL "https://api.github.com/repos/$REPOSITORY/releases" 2>/dev/null | grep '"tag_name":' | sed -E 's/.*"tag_name":[[:space:]]*"([^"]+)".*/\1/' || true)
+    fi
+
+    if [[ -n "$raw_tags" ]]; then
+        # Priority 1: stage descending, Priority 2: contract descending, Priority 3: exact contract end
+        tag=$(echo "$raw_tags" | awk '
+        {
+            t = $0
+            stage = -1
+            contract = -1
+            exact_end = 0
+            if (match(t, /^stage([0-9]+)-contract([0-9]+)/)) {
+                s_part = substr(t, RSTART, RLENGTH)
+                sub(/^stage/, "", s_part)
+                split(s_part, parts, "-contract")
+                stage = parts[1] + 0
+                contract = parts[2] + 0
+                if (t ~ /^stage[0-9]+-contract[0-9]+$/) {
+                    exact_end = 1
+                }
+            }
+            printf "%06d %06d %d %s\n", stage, contract, exact_end, t
+        }' | sort -r | head -n 1 | awk '{print $4}')
+    fi
+
+    # Fallback to releases/latest API endpoint
+    if [[ -z "$tag" ]] && command -v curl >/dev/null 2>&1; then
+        tag=$(curl -fsSL "https://api.github.com/repos/$REPOSITORY/releases/latest" 2>/dev/null | grep -m1 '"tag_name":' | sed -E 's/.*"tag_name":[[:space:]]*"([^"]+)".*/\1/' || true)
+    fi
+
+    if [[ -z "$tag" ]]; then
+        echo "Error: Failed to determine latest release tag from GitHub ($REPOSITORY)." >&2
+        echo "Please specify TAG explicitly, e.g.: $0 stage1-contract2" >&2
+        exit 1
+    fi
+    echo "$tag"
+}
+
+if [[ $# -gt 0 && ("$1" == "-h" || "$1" == "--help" || "$1" == "help") ]]; then
+    usage 0
 fi
 
-tag="$1"
-target="${2:-all}"
-output="${3:-assets/$tag}"
+if [[ $# -gt 3 ]]; then
+    usage 2
+fi
 
-# If second argument is a custom path instead of a target keyword, treat it as output dir
+tag=""
+target="all"
+output=""
+
+if [[ $# -eq 0 ]]; then
+    tag="latest"
+    target="all"
+elif [[ "$1" == "latest" ]]; then
+    tag="latest"
+    target="${2:-all}"
+    output="${3:-}"
+elif [[ "$1" == "all" || "$1" == "model" || "$1" == "db" || "$1" == "embedding" || "$1" == "emb" ]]; then
+    tag="latest"
+    target="$1"
+    output="${2:-}"
+else
+    tag="$1"
+    target="${2:-all}"
+    output="${3:-}"
+fi
+
+# If target is a custom directory path instead of a target keyword
 if [[ "$target" != "all" && "$target" != "model" && "$target" != "db" && "$target" != "embedding" && "$target" != "emb" ]]; then
     output="$target"
     target="all"
+fi
+
+if [[ "$tag" == "latest" ]]; then
+    tag=$(get_latest_tag)
+    echo "==> Selected latest release tag: $tag"
+fi
+
+if [[ -z "$output" ]]; then
+    output="assets/$tag"
 fi
 
 mkdir -p "$output"
@@ -94,7 +174,7 @@ case "$target" in
         fetch_embedding
         ;;
     *)
-        usage
+        usage 2
         ;;
 esac
 

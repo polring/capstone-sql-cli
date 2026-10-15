@@ -79,17 +79,23 @@
 
 ### 1) 진입 방법 및 자산 자동 탐색 (Auto-Discovery)
 ```bash
-# 1. 인자 없이 실행 (터미널 환경에서 자동 쉘 진입 및 assets/ 폴더 내 자산 자동 로드)
+# 1. 인자 없이 실행 (터미널 환경에서 자동 쉘 진입 및 assets/ 폴더 내 최신 자산 자동 로드)
 ./build/sql-cli
 
 # 2. 명시적으로 대화형 플래그 지정
 ./build/sql-cli -i
 
 # 3. 특정 모델 파일을 지정하여 진입
-./build/sql-cli assets/stage1-contract2-rc1/model.gguf -i
+./build/sql-cli assets/stage1-contract2/model.gguf -i
 ```
 > [!TIP]
-> 모델/DB를 지정하지 않고 쉘을 시작하면, `assets/` 및 하위 폴더를 스캔하여 존재하는 유효 모델(`model.gguf`), DB 스키마(`shop.db`), GloVe 임베딩(`semantic_dict_300d.bin`)을 **자동으로 감지하여 즉시 사용할 수 있도록 기본 로드**합니다.
+> **자산 자동 탐색 우선순위**:
+> 모델/DB를 직접 지정하지 않고 쉘을 시작하면, `assets/` 폴더 내 하위 디렉터리들을 스캔하여 다음 순서로 최신 번들을 감지하여 즉시 로드합니다:
+> 1. **1순위**: `stage` 번호가 높은 순 (예: `stage2` > `stage1`)
+> 2. **2순위**: stage 번호가 같으면 `contract` 번호가 높은 순 (예: `contract2` > `contract1`)
+> 3. **3순위**: 2순위까지 같으면 딱 맞는 이름(`contract<N>`으로 끝남) 우선 (예: `stage1-contract2` > `stage1-contract2-rc1`)
+>
+> 감지된 최신 폴더 내의 `.gguf`(모델), `.db`(스키마 사전), `.bin`(GloVe 임베딩)을 메모리에 원스톱으로 상주시킵니다.
 
 ### 2) 대화형 쉘 설정 및 제어 명령어 (`/set` 등)
 명령어는 슬래시(`/`) 접두사로 입력합니다.

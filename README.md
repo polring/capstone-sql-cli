@@ -105,20 +105,20 @@ dotnet build src/bindings/SqlEngine.Core
 ## 4. 실행 방법
 
 ### 1) 모델, DB 및 임베딩 사전 가져오기 (Fetch)
-`scripts/fetch-assets` 스크립트를 통해 필요한 구성 요소만 선택적으로 다운로드하거나 전체를 일괄 업데이트할 수 있습니다:
+`scripts/fetch-assets` (또는 `scripts/fetch-asset`) 스크립트를 통해 GitHub Release에서 필요한 자산을 자동으로 가져옵니다:
 
 ```bash
-# 전체 일괄 업데이트 (모델 + DB + 임베딩 .bin 일괄 다운로드, 기본값)
-scripts/fetch-assets stage1-contract2-rc1 all
+# [최신 버전 일괄 자동 다운로드] 인자 없이 실행 시 최신 Release 태그 자동 감지 및 일괄 다운로드
+scripts/fetch-assets
 
-# 모델 가중치만 가져오기 (model.gguf, model_info.json, SHA256SUMS)
-scripts/fetch-assets stage1-contract2-rc1 model
+# 또는 특정 구성 요소만 최신 버전으로 가져오기
+scripts/fetch-assets model          # 최신 버전 모델만 가져오기
+scripts/fetch-assets db             # 최신 버전 shop.db만 가져오기
+scripts/fetch-assets embedding      # 최신 버전 semantic_dict_300d.bin만 가져오기
 
-# SQLite 스키마 DB만 가져오기 (shop.db)
-scripts/fetch-assets stage1-contract2-rc1 db
-
-# 후처리기 유사도 임베딩 사전만 가져오기 (semantic_dict_300d.bin)
-scripts/fetch-assets stage1-contract2-rc1 embedding
+# 특정 버전 태그를 직접 지정하여 가져오기
+scripts/fetch-assets stage1-contract2 all
+scripts/fetch-assets stage1-contract2 model
 ```
 
 ### 2) CLI 실행 방법
@@ -126,10 +126,11 @@ scripts/fetch-assets stage1-contract2-rc1 embedding
 자세한 모든 옵션 및 파라미터는 [docs/CLI_USAGE.md](docs/CLI_USAGE.md)를 참고하세요.
 
 ```bash
-# [추천 1] 대화형 REPL 쉘 실행 (인자 없이 실행 시 assets/ 내 모델, DB, 임베딩 자동 감지 및 로드)
+# [추천 1] 대화형 REPL 쉘 실행 (인자 없이 실행 시 assets/ 내 가장 최신 버전 번들 자동 감지 및 로드)
+# * 자동 감지 우선순위: 1) stage 높은 순 -> 2) contract 높은 순 -> 3) 딱 맞는 이름(contract<N>) 우선
 ./build/sql-cli -i
 # 또는 특정 모델 지정하여 실행:
-# ./build/sql-cli assets/stage1-contract2-rc1/model.gguf -i
+# ./build/sql-cli assets/stage1-contract2/model.gguf -i
 
 # * 대화형 쉘 내 주요 명령어:
 #   /ls                           : 선택 가능한 모델(*.gguf), DB(*.db), 임베딩(*.bin) 목록 확인

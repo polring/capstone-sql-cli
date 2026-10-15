@@ -1286,6 +1286,80 @@ static int list_directory_entries(const char *dir_path, char names[][256],
     return count;
 }
 
+typedef struct {
+    char name[256];
+    int stage;
+    int contract;
+    int has_stage_contract;
+    int is_exact_contract_end;
+} AssetBundleEntry;
+
+static void parse_stage_contract_name(const char *name, int *out_stage,
+                                      int *out_contract, int *out_has_sc,
+                                      int *out_exact_end) {
+    *out_stage = -1;
+    *out_contract = -1;
+    *out_has_sc = 0;
+    *out_exact_end = 0;
+
+    const char *p = name;
+    if ((p[0] == 's' || p[0] == 'S') && (p[1] == 't' || p[1] == 'T') &&
+        (p[2] == 'a' || p[2] == 'A') && (p[3] == 'g' || p[3] == 'G') &&
+        (p[4] == 'e' || p[4] == 'E')) {
+        p += 5;
+        char *end1;
+        long s = strtol(p, &end1, 10);
+        if (end1 != p && s >= 0) {
+            p = end1;
+            if (p[0] == '-' && (p[1] == 'c' || p[1] == 'C') &&
+                (p[2] == 'o' || p[2] == 'O') && (p[3] == 'n' || p[3] == 'N') &&
+                (p[4] == 't' || p[4] == 'T') && (p[5] == 'r' || p[5] == 'R') &&
+                (p[6] == 'a' || p[6] == 'A') && (p[7] == 'c' || p[7] == 'C') &&
+                (p[8] == 't' || p[8] == 'T')) {
+                p += 9;
+                char *end2;
+                long c = strtol(p, &end2, 10);
+                if (end2 != p && c >= 0) {
+                    *out_stage = (int)s;
+                    *out_contract = (int)c;
+                    *out_has_sc = 1;
+                    if (*end2 == '\0') {
+                        *out_exact_end = 1;
+                    }
+                }
+            }
+        }
+    }
+}
+
+static int compare_asset_bundles(const void *a, const void *b) {
+    const AssetBundleEntry *ea = (const AssetBundleEntry *)a;
+    const AssetBundleEntry *eb = (const AssetBundleEntry *)b;
+
+    /* 1. Patterns matching stage<num>-contract<num> come first */
+    if (ea->has_stage_contract != eb->has_stage_contract) {
+        return eb->has_stage_contract - ea->has_stage_contract;
+    }
+
+    if (ea->has_stage_contract) {
+        /* 1순위: stage 높은 순 */
+        if (ea->stage != eb->stage) {
+            return eb->stage - ea->stage;
+        }
+        /* 2순위: contract 높은 순 */
+        if (ea->contract != eb->contract) {
+            return eb->contract - ea->contract;
+        }
+        /* 2순위까지 같은 경우: 딱 맞는 이름 (contract<num>으로 끝남) 우선 */
+        if (ea->is_exact_contract_end != eb->is_exact_contract_end) {
+            return eb->is_exact_contract_end - ea->is_exact_contract_end;
+        }
+    }
+
+    /* Fallback: alphabetical */
+    return strcmp(ea->name, eb->name);
+}
+
 static void print_assets_in_dir(const char *dir, const char *filter, int *p_models,
                                 int *p_dbs, int *p_embs) {
     char names[MAX_DIR_ENTRIES][256];
@@ -1392,16 +1466,34 @@ static void list_available_assets(const char *arg) {
 
         /* 1. Show Asset Bundles (Directories inside assets/) */
         if (show_bundles && n > 0) {
+            AssetBundleEntry bundles[MAX_DIR_ENTRIES];
+            int bundle_count = 0;
             for (int i = 0; i < n; i++) {
                 if (is_dirs[i]) {
-                    if (found_bundles == 0) {
-                        printf("\n  [Asset Bundles (Batch Load: Model + DB + "
-                               "Embedding)]\n");
-                    }
-                    printf("    assets/%s\n      -> /set asset %s  (or /asset %s)\n",
-                           names[i], names[i], names[i]);
-                    found_bundles++;
+                    strncpy(bundles[bundle_count].name, names[i],
+                            sizeof(bundles[bundle_count].name) - 1);
+                    bundles[bundle_count].name[sizeof(bundles[bundle_count].name) - 1] =
+                        '\0';
+                    parse_stage_contract_name(
+                        names[i], &bundles[bundle_count].stage,
+                        &bundles[bundle_count].contract,
+                        &bundles[bundle_count].has_stage_contract,
+                        &bundles[bundle_count].is_exact_contract_end);
+                    bundle_count++;
                 }
+            }
+            if (bundle_count > 1) {
+                qsort(bundles, bundle_count, sizeof(AssetBundleEntry),
+                      compare_asset_bundles);
+            }
+            for (int i = 0; i < bundle_count; i++) {
+                if (found_bundles == 0) {
+                    printf("\n  [Asset Bundles (Batch Load: Model + DB + "
+                           "Embedding)]\n");
+                }
+                printf("    assets/%s\n      -> /set asset %s  (or /asset %s)\n",
+                       bundles[i].name, bundles[i].name, bundles[i].name);
+                found_bundles++;
             }
         }
 
@@ -1526,20 +1618,40 @@ static void auto_discover_interactive_assets(Model *model, int *model_loaded,
         return;
     }
 
-    /* Check subdirectories of assets/ first */
+    /* Check subdirectories of assets/ first (sorted by stage, then contract descending) */
     char names[MAX_DIR_ENTRIES][256];
     int is_dirs[MAX_DIR_ENTRIES];
     int n = list_directory_entries("assets", names, is_dirs, MAX_DIR_ENTRIES);
     if (n > 0) {
+        AssetBundleEntry bundles[MAX_DIR_ENTRIES];
+        int bundle_count = 0;
         for (int i = 0; i < n; i++) {
             if (is_dirs[i]) {
-                char sub_path[512];
-                snprintf(sub_path, sizeof(sub_path), "assets/%s", names[i]);
-                if (load_asset_folder(sub_path, model, model_loaded, model_path,
-                                      model_path_size, db_path, db_path_size,
-                                      dictionary, dict_size, dim, dim_specified, 1)) {
-                    return;
-                }
+                strncpy(bundles[bundle_count].name, names[i],
+                        sizeof(bundles[bundle_count].name) - 1);
+                bundles[bundle_count].name[sizeof(bundles[bundle_count].name) - 1] =
+                    '\0';
+                parse_stage_contract_name(
+                    names[i], &bundles[bundle_count].stage,
+                    &bundles[bundle_count].contract,
+                    &bundles[bundle_count].has_stage_contract,
+                    &bundles[bundle_count].is_exact_contract_end);
+                bundle_count++;
+            }
+        }
+
+        if (bundle_count > 1) {
+            qsort(bundles, bundle_count, sizeof(AssetBundleEntry),
+                  compare_asset_bundles);
+        }
+
+        for (int i = 0; i < bundle_count; i++) {
+            char sub_path[512];
+            snprintf(sub_path, sizeof(sub_path), "assets/%s", bundles[i].name);
+            if (load_asset_folder(sub_path, model, model_loaded, model_path,
+                                  model_path_size, db_path, db_path_size,
+                                  dictionary, dict_size, dim, dim_specified, 1)) {
+                return;
             }
         }
         /* Check assets/ directly */
