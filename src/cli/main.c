@@ -1294,6 +1294,12 @@ typedef struct {
     int is_exact_contract_end;
 } AssetBundleEntry;
 
+#ifdef _WIN32
+#define STRNICMP _strnicmp
+#else
+#define STRNICMP strncasecmp
+#endif
+
 static void parse_stage_contract_name(const char *name, int *out_stage,
                                       int *out_contract, int *out_has_sc,
                                       int *out_exact_end) {
@@ -1303,19 +1309,13 @@ static void parse_stage_contract_name(const char *name, int *out_stage,
     *out_exact_end = 0;
 
     const char *p = name;
-    if ((p[0] == 's' || p[0] == 'S') && (p[1] == 't' || p[1] == 'T') &&
-        (p[2] == 'a' || p[2] == 'A') && (p[3] == 'g' || p[3] == 'G') &&
-        (p[4] == 'e' || p[4] == 'E')) {
+    if (STRNICMP(p, "stage", 5) == 0) {
         p += 5;
         char *end1;
         long s = strtol(p, &end1, 10);
         if (end1 != p && s >= 0) {
             p = end1;
-            if (p[0] == '-' && (p[1] == 'c' || p[1] == 'C') &&
-                (p[2] == 'o' || p[2] == 'O') && (p[3] == 'n' || p[3] == 'N') &&
-                (p[4] == 't' || p[4] == 'T') && (p[5] == 'r' || p[5] == 'R') &&
-                (p[6] == 'a' || p[6] == 'A') && (p[7] == 'c' || p[7] == 'C') &&
-                (p[8] == 't' || p[8] == 'T')) {
+            if (STRNICMP(p, "-contract", 9) == 0) {
                 p += 9;
                 char *end2;
                 long c = strtol(p, &end2, 10);
@@ -1470,15 +1470,12 @@ static void list_available_assets(const char *arg) {
             int bundle_count = 0;
             for (int i = 0; i < n; i++) {
                 if (is_dirs[i]) {
-                    strncpy(bundles[bundle_count].name, names[i],
-                            sizeof(bundles[bundle_count].name) - 1);
-                    bundles[bundle_count].name[sizeof(bundles[bundle_count].name) - 1] =
-                        '\0';
-                    parse_stage_contract_name(
-                        names[i], &bundles[bundle_count].stage,
-                        &bundles[bundle_count].contract,
-                        &bundles[bundle_count].has_stage_contract,
-                        &bundles[bundle_count].is_exact_contract_end);
+                    AssetBundleEntry *b = &bundles[bundle_count];
+                    strncpy(b->name, names[i], sizeof(b->name) - 1);
+                    b->name[sizeof(b->name) - 1] = '\0';
+                    parse_stage_contract_name(names[i], &b->stage, &b->contract,
+                                              &b->has_stage_contract,
+                                              &b->is_exact_contract_end);
                     bundle_count++;
                 }
             }
@@ -1618,7 +1615,8 @@ static void auto_discover_interactive_assets(Model *model, int *model_loaded,
         return;
     }
 
-    /* Check subdirectories of assets/ first (sorted by stage, then contract descending) */
+    /* Check subdirectories of assets/ first (sorted by stage, then contract descending)
+     */
     char names[MAX_DIR_ENTRIES][256];
     int is_dirs[MAX_DIR_ENTRIES];
     int n = list_directory_entries("assets", names, is_dirs, MAX_DIR_ENTRIES);
@@ -1631,11 +1629,10 @@ static void auto_discover_interactive_assets(Model *model, int *model_loaded,
                         sizeof(bundles[bundle_count].name) - 1);
                 bundles[bundle_count].name[sizeof(bundles[bundle_count].name) - 1] =
                     '\0';
-                parse_stage_contract_name(
-                    names[i], &bundles[bundle_count].stage,
-                    &bundles[bundle_count].contract,
-                    &bundles[bundle_count].has_stage_contract,
-                    &bundles[bundle_count].is_exact_contract_end);
+                parse_stage_contract_name(names[i], &bundles[bundle_count].stage,
+                                          &bundles[bundle_count].contract,
+                                          &bundles[bundle_count].has_stage_contract,
+                                          &bundles[bundle_count].is_exact_contract_end);
                 bundle_count++;
             }
         }
@@ -1649,8 +1646,8 @@ static void auto_discover_interactive_assets(Model *model, int *model_loaded,
             char sub_path[512];
             snprintf(sub_path, sizeof(sub_path), "assets/%s", bundles[i].name);
             if (load_asset_folder(sub_path, model, model_loaded, model_path,
-                                  model_path_size, db_path, db_path_size,
-                                  dictionary, dict_size, dim, dim_specified, 1)) {
+                                  model_path_size, db_path, db_path_size, dictionary,
+                                  dict_size, dim, dim_specified, 1)) {
                 return;
             }
         }
