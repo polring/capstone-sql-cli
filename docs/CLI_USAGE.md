@@ -28,28 +28,48 @@
 
 | 모드 플래그                    | 설명                                                                                      | 필수/선택 인자       |
 | :------------------------ | :-------------------------------------------------------------------------------------- | :------------- |
-| **`--query`** *(또는 `-q`)* | **[기본 추천]** 자연어 $\rightarrow$ SQL 생성 $\rightarrow$ 스키마 오타 교정 원스톱 실행 (구 `--pipeline` 호환) | `QUESTION`     |
-| **`--generate`**          | 순수 모델 생성: 오타 교정 없이 모델의 Raw SQL 출력                                                       | `QUESTION`     |
-| **`--postprocess`**       | **[단독]** 모델 없이 입력된 SQL의 예약어 및 스키마 오타 직접 교정                                              | `SQL`          |
+| **`--query`** *(또는 `-q`)* | **[기본 질의]** 자연어 $\rightarrow$ LLM 추론 $\rightarrow$ 5단계 계단식 후처리기 파이프라인 (구 `--pipeline` 호환) | `QUESTION`     |
+| **`--postprocess`**       | **[단독 후처리]** LLM 모델 없이 입력된 SQL에 대해 5단계 계단식 후처리 직접 적용                                  | `SQL`          |
+| **`--json`**              | **[JSON 파일 입출력]** 입력 JSON을 읽고 질의별 SQL 결과(`question`, `sql`)를 출력 JSON 파일로 작성                 | `IN.json OUT.json` |
+| **`--generate`**          | *(계약 테스트 호환)* 순수 모델 생성 (CLI에서는 `--query --strategy none` 사용 권장)                      | `QUESTION`     |
 | **`--encode`**            | BPE 토큰화: 입력 텍스트를 정수 토큰 ID 배열로 변환                                                        | `TEXT`         |
 | **`--logits`**            | 로짓 계산: 주어진 토큰 시퀀스에 대해 Vocab 확률 벡터 계산                                                    | `TOKEN_ID...`  |
-| **`--json`**              | **[JSON 파일 입출력]** 입력 JSON(`question` 추출)을 읽고 질의별 SQL 결과(`question`, `sql`)를 출력 JSON 파일로 작성 | `IN.json OUT.json` |
 | **`-i`, `--interactive`** | **[대화형]** 모델/DB를 메모리에 상주시킨 상태로 연속 질의 가능한 REPL 쉘 시작                                      | `[MODEL.gguf]` |
 
-### 2) 명시적 옵션 플래그 (Options)
+### 2) 5단계 계단식 후처리 전략 (Cascading Strategies)
 
-| 플래그                          | 설명                                      | 기본값          | 비고                                                         |
-| :--------------------------- | :-------------------------------------- | :----------- | :--------------------------------------------------------- |
-| **`-b`, `--db <경로>`**        | 스키마 사전(테이블/컬럼명)을 로드할 SQLite `.db` 파일 경로 | 없음           | 생략 시 SQL 예약어만 기본 교정 (배치 모드 자동 탐색 없음)             |
-| **`-s`, `--strategy <목록>`**  | 적용할 후처리 교정 전략 목록 (쉼표 구분 순서 지정)          | `typo,ngram` | 사용 가능 전략: `typo`, `ngram`, `semantic`                      |
-| **`-d`, `--dim <값>`**        | GloVe 단어 임베딩 벡터 차원                      | 없음           | **`semantic` 전략 포함 시 필수** (`50`, `100`, `200`, `300` 중 택1) |
-| **`-t`, `--threshold <실수>`** | `semantic` 유사도 코사인 임계값                  | `0.0`        | 0.0 ~ 1.0 실수 (대화형 모드는 기본값 `0.5`)                     |
-| **`--max-tokens <정수>`**      | 최대 생성 토큰 수                              | `32`         | 양의 정수                                                      |
+전략은 반드시 **왼쪽에서 오른쪽 순서대로만 누적 적용**되며, 뒤쪽 단계는 생략할 수 있습니다 (순서 역전이나 중간 단계 건너뛰기는 유효성 검사에서 차단됩니다):
 
-> [!NOTE]
-> **배치 모드 vs 대화형 모드 정책 차이**:
-> * **기본 CLI 한 줄 실행 (배치 모드)**: 묵시적 기본값이나 임의의 자동 탐색 없이, 사용자가 명령줄에 명시한 옵션(`--db`, `--strategy`, `--dim` 등)만 엄격히 적용됩니다 (`threshold` 기본값 `0.0`).
-> * **대화형 모드 (`-i`)**: 실행 시 `assets/` 디렉터리를 스캔하여 존재하는 자산을 자동으로 감지/기본 지정하며, `dim=300`, `threshold=0.5`가 적용되어 즉시 테스트할 수 있습니다.
+```text
+[Stage 0: none]     날것의 SQL 그대로 유지 (구 generate 모드와 동일)
+       ↓
+[Stage 1: keyword]  SQL 예약어 및 구문 교정 (SELECT, FROM 등)
+       ↓
+[Stage 2: typo]     예약어 교정 + SQLite DB 스키마 기반 유사도 오타 교정 (--db 필수)
+       ↓
+[Stage 3: ngram]    예약어 + 오타 + N-gram 식별자 매칭 (--db 필수)
+       ↓
+[Stage 4: semantic] 예약어 + 오타 + N-gram + Word2Vec 임베딩 코사인 유사도 교정 (--db, --dim, --threshold 필수)
+```
+
+* **지정 방식**: 단일 전략 이름 (`none`, `keyword`, `typo`, `ngram`, `semantic`) 또는 누적 순서 (`keyword,typo`, `keyword,typo,ngram` 등)로 지정할 수 있습니다.
+
+### 3) 명시적 옵션 플래그 (One-line CLI: 기본값 없음, 직접 지정 필수)
+
+배치/한 줄 실행 모드에서는 묵시적 기본값이 없으며, 모드 및 전략에 따라 필요한 모든 옵션을 직접 지정해야 합니다:
+
+| 플래그                          | 설명                                      | 필수 여부                                                     |
+| :--------------------------- | :-------------------------------------- | :-------------------------------------------------------- |
+| **`-s`, `--strategy <전략>`**  | 5단계 계단식 후처리 전략 (`none`, `keyword`, `typo`, `ngram`, `semantic`) | **모든 한 줄 실행 필수**                                         |
+| **`--max-tokens <정수>`**      | 모델 추론 시 최대 생성 토큰 수                      | **`--query` 및 `--json` 실행 시 필수**                        |
+| **`-b`, `--db <경로>`**        | 스키마 사전(테이블/컬럼명)을 로드할 SQLite `.db` 파일 경로 | **`typo`, `ngram`, `semantic` 전략 사용 시 필수**             |
+| **`-d`, `--dim <값>`**        | 단어 임베딩 벡터 차원 (`50`, `100`, `200`, `300`)   | **`semantic` 전략 사용 시 필수**                               |
+| **`-t`, `--threshold <실수>`** | `semantic` 유사도 코사인 임계값 (0.0 ~ 1.0)        | **`semantic` 전략 사용 시 필수**                               |
+
+> [!IMPORTANT]
+> **배치 모드 vs 대화형 모드 정책**:
+> * **CLI 한 줄 실행**: 기본값이 없으므로 필요한 옵션을 모두 명령줄에 명시해야 합니다. 누락 시 안내 오류와 함께 종료 코드 1로 거부됩니다.
+> * **대화형 모드 (`-i`)**: 쉘 편의를 위해 `assets/` 자산 자동 탐색 및 빠른 시작 기본값이 제공되며, `/set` 명령어로 자유롭게 재설정할 수 있습니다.
 
 ---
 
@@ -231,30 +251,37 @@ SELECT city FROM customers
 
 입력 JSON 파일(`input.json`)에서 `question` 필드를 추출하여 SQL을 생성/후처리한 뒤, 각 질문과 생성된 SQL(`sql`)만 담은 결과 JSON 파일(`output.json`)로 저장합니다. 하나의 파일에 여러 개의 질의가 포함되어 있어도 일괄 처리합니다.
 
-- **명령줄 실행 (기본 query 모드: 생성 + 후처리)**:
+- **명령줄 실행 (Query 모드: LLM 추론 + 후처리)**:
   ```bash
   ./build/sql-cli assets/stage1-contract2-rc1/model.gguf \
     --json input.json output.json \
+    --strategy typo,ngram \
+    --db assets/stage1-contract2-rc1/shop.db \
+    --max-tokens 64
+  ```
+- **순수 모델 생성(Stage 0: none)으로 일괄 변환 (후처리 없음)**:
+  ```bash
+  ./build/sql-cli assets/stage1-contract2-rc1/model.gguf \
+    --json input.json output.json \
+    --strategy none \
+    --max-tokens 64
+  ```
+- **단독 후처리 JSON 일괄 변환 (`--postprocess --json`)**:
+  모델 없이 SQL 목록이 담긴 JSON을 읽어 오타를 일괄 교정합니다:
+  ```bash
+  ./build/sql-cli --postprocess \
+    --json input.json output.json \
+    --strategy typo \
     --db assets/stage1-contract2-rc1/shop.db
   ```
-- **순수 생성(generate) 모드로 일괄 변환 (후처리 건너뛰기)**:
-  ```bash
-  ./build/sql-cli assets/stage1-contract2-rc1/model.gguf \
-    --json input.json output.json \
-    --mode generate
-  # 또는 --generate 플래그 지정
-  # ./build/sql-cli assets/stage1-contract2-rc1/model.gguf --json input.json output.json --generate
-  ```
 - **대화형 쉘 내부에서 실행 (`/json`)**:
-  대화형 쉘에서는 현재 로드된 모델, DB, 전략뿐 아니라 활성화된 모드(`/set mode gen` 또는 `/set mode query`)를 그대로 반영하여 일괄 처리합니다:
+  대화형 쉘에서는 현재 활성화된 모드(`query` 또는 `post`), DB, 전략 설정을 그대로 반영하여 일괄 처리합니다:
   ```text
-  sql-query> /set mode gen
-  Mode switched to: generate (raw model output)
-  sql-gen> /json input.json output.json
+  sql-query> /set strategy typo
+  sql-query> /json input.json output.json
   Processing JSON: 'input.json' -> 'output.json'
-    Mode:     generate (raw SQL)
-    Database: shop.db
-    Strategy: typo,ngram
+    Strategy: typo (Level 2)
+    Database: assets/stage1-contract2-rc1/shop.db
   Successfully wrote results to 'output.json'
   ```
 - **또는 출력 파일 경로 옵션(`-o` / `--output`) 사용**:

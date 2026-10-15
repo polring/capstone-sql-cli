@@ -64,10 +64,14 @@ typedef struct {
     const char *output_json_path;
     const char *db_path;
     const char *strategy;
+    int strategy_specified;
+    PostprocessLevel postprocess_level;
     int dim;
     int dim_specified;
     double threshold;
+    int threshold_specified;
     int max_new_tokens;
+    int max_new_tokens_specified;
     char **token_arguments;
     int token_argument_count;
     char *allocated_text;
@@ -104,15 +108,41 @@ static int parse_nonnegative_integer(const char *text) {
     return (int)value;
 }
 
-static void validate_strategy_and_dim(const char *strategy, int dim,
-                                      int dim_specified) {
-    if (strategy && strstr(strategy, "semantic") != NULL) {
+static void validate_postprocess_options(const char *strategy, int strategy_specified,
+                                         const char *db_path, int dim,
+                                         int dim_specified, double threshold,
+                                         int threshold_specified, int max_tokens,
+                                         int max_tokens_specified,
+                                         int require_max_tokens) {
+    if (!strategy_specified || !strategy || !*strategy) {
+        fail("missing required option: --strategy <none|keyword|typo|ngram|semantic>");
+    }
+
+    PostprocessLevel level;
+    if (parse_postprocess_level(strategy, &level) != 0) {
+        fail("invalid strategy: choose from cascading sequence (none, keyword, typo, "
+             "ngram, semantic)");
+    }
+
+    if (require_max_tokens && !max_tokens_specified) {
+        fail("missing required option: --max-tokens <number>");
+    }
+
+    if (level >= POSTPROCESS_LEVEL_TYPO && (!db_path || !*db_path)) {
+        fail("missing required option: --db <path> (required for strategy typo, ngram, "
+             "semantic)");
+    }
+
+    if (level == POSTPROCESS_LEVEL_SEMANTIC) {
         if (!dim_specified) {
-            fail("--dim is required when 'semantic' strategy is used (choose 50, 100, "
-                 "200, 300)");
+            fail("missing required option: --dim <50|100|200|300> for semantic "
+                 "strategy");
         }
         if (dim != 50 && dim != 100 && dim != 200 && dim != 300) {
             fail("invalid --dim value: must be 50, 100, 200, or 300");
+        }
+        if (!threshold_specified) {
+            fail("missing required option: --threshold <float> for semantic strategy");
         }
     }
 }
@@ -183,13 +213,13 @@ static char *read_file_to_string(const char *path) {
     return buf;
 }
 
-static char **extract_all_json_questions(const char *json, size_t *out_count,
-                                         int *out_is_array) {
+static char **extract_all_json_strings_by_key(const char *json, const char *key,
+                                              size_t *out_count, int *out_is_array) {
     *out_count = 0;
     if (out_is_array) {
         *out_is_array = 0;
     }
-    if (!json) {
+    if (!json || !key) {
         return NULL;
     }
 
@@ -205,15 +235,16 @@ static char **extract_all_json_questions(const char *json, size_t *out_count,
     }
 
     size_t capacity = 16;
-    char **questions = (char **)malloc(capacity * sizeof(char *));
-    if (!questions) {
+    char **results = (char **)malloc(capacity * sizeof(char *));
+    if (!results) {
         return NULL;
     }
     size_t count = 0;
+    size_t key_len = strlen(key);
 
     const char *p = json;
     while (*p) {
-        const char *match = strstr(p, "question");
+        const char *match = strstr(p, key);
         if (!match) {
             break;
         }
@@ -221,12 +252,12 @@ static char **extract_all_json_questions(const char *json, size_t *out_count,
         if (match > json) {
             char prev = match[-1];
             if (isalnum((unsigned char)prev) || prev == '_') {
-                p = match + 8;
+                p = match + key_len;
                 continue;
             }
         }
 
-        const char *after_key = match + 8;
+        const char *after_key = match + key_len;
         int quoted_key = (match > json && (match[-1] == '\"' || match[-1] == '\''));
         if (quoted_key) {
             if (*after_key != '\"' && *after_key != '\'') {
@@ -327,20 +358,25 @@ static char **extract_all_json_questions(const char *json, size_t *out_count,
 
         if (count >= capacity) {
             capacity *= 2;
-            char **new_q = (char **)realloc(questions, capacity * sizeof(char *));
+            char **new_q = (char **)realloc(results, capacity * sizeof(char *));
             if (!new_q) {
                 free(extracted);
                 break;
             }
-            questions = new_q;
+            results = new_q;
         }
-        questions[count++] = extracted;
+        results[count++] = extracted;
 
         p = after_key + 1;
     }
 
     *out_count = count;
-    return questions;
+    return results;
+}
+
+static char **extract_all_json_questions(const char *json, size_t *out_count,
+                                         int *out_is_array) {
+    return extract_all_json_strings_by_key(json, "question", out_count, out_is_array);
 }
 
 static void print_json_escaped_string(FILE *out, const char *str) {
@@ -408,19 +444,19 @@ static void print_usage(const char *program_name) {
         stderr,
         "usage:\n"
         "  %s MODEL.gguf [mode] [arguments...]\n"
-        "  %s --postprocess SQL [options...]\n"
+        "  %s --postprocess SQL --strategy <none|keyword|typo|ngram|semantic> "
+        "[options...]\n"
         "  %s [MODEL.gguf] -i\n\n"
         "modes:\n"
-        "  --query QUESTION [--db PATH] [--strategy STRATS] [--dim DIM] "
-        "[--max-tokens N]\n"
-        "      (alias: --pipeline) Generate and correct SQL using schema\n"
-        "  --json INPUT.json OUTPUT.json [--db PATH] [--strategy STRATS] [--dim DIM] "
-        "[--max-tokens N]\n"
+        "  --query QUESTION --strategy STRAT --max-tokens N [--db PATH] [--dim DIM] "
+        "[--threshold FLOAT]\n"
+        "      Generate and correct SQL using cascading postprocessor\n"
+        "  --json INPUT.json OUTPUT.json --strategy STRAT --max-tokens N [--db PATH] "
+        "[--dim DIM] [--threshold FLOAT]\n"
         "      Read questions from INPUT.json and write questions with SQL outputs to "
         "OUTPUT.json\n"
-        "  --generate QUESTION [max_new_tokens]\n"
-        "      Generate raw SQL from question without post-processing\n"
-        "  --postprocess SQL [--db PATH] [--strategy STRATS] [--dim DIM]\n"
+        "  --postprocess SQL --strategy STRAT [--db PATH] [--dim DIM] [--threshold "
+        "FLOAT]\n"
         "      Directly correct SQL without running neural model\n"
         "  --encode TEXT\n"
         "      Encode text into BPE token IDs\n"
@@ -428,14 +464,23 @@ static void print_usage(const char *program_name) {
         "      Compute logits for token sequence\n"
         "  -i, --interactive\n"
         "      Start interactive REPL session\n\n"
+        "strategies (cascading order: none -> keyword -> typo -> ngram -> semantic):\n"
+        "  none                    Raw model output without any postprocessing\n"
+        "  keyword                 SQL reserved keyword pre-correction and formatting\n"
+        "  typo                    keyword + database schema typo correction\n"
+        "  ngram                   keyword + typo + N-gram identifier correction\n"
+        "  semantic                keyword + typo + N-gram + Word2Vec embedding "
+        "correction\n\n"
         "options:\n"
-        "  -b, --db PATH           Path to SQLite database for schema dictionary\n"
-        "  -s, --strategy STRATS   Correction strategies (e.g. "
-        "typo,ngram,semantic. Default: typo,ngram)\n"
-        "  -d, --dim <50|100|200|300> GloVe vector dimension (required when using "
-        "'semantic')\n"
-        "  -t, --threshold FLOAT   Semantic similarity threshold (default: 0.0)\n"
-        "  --max-tokens N          Maximum new tokens to generate (default: 32)\n",
+        "  -s, --strategy STRAT    Postprocessing strategy level (required in one-line "
+        "execution)\n"
+        "  --max-tokens N          Maximum new tokens to generate (required in "
+        "one-line execution)\n"
+        "  -b, --db PATH           Path to SQLite database (required for typo, ngram, "
+        "semantic)\n"
+        "  -d, --dim <50|100|200|300> Embedding dimension (required for semantic)\n"
+        "  -t, --threshold FLOAT   Semantic similarity threshold (required for "
+        "semantic)\n",
         program_name, program_name, program_name);
 }
 
@@ -450,9 +495,6 @@ static int is_logits_request(int argc, char **argv) {
 
 static CliOptions parse_cli_options(int argc, char **argv) {
     CliOptions options = {0};
-    options.strategy = "typo,ngram";
-    options.max_new_tokens = DEFAULT_MAX_NEW_TOKENS;
-    options.threshold = 0.0;
 
     if (is_logits_request(argc, argv)) {
         options.mode = CLI_MODE_LOGITS;
@@ -475,7 +517,6 @@ static CliOptions parse_cli_options(int argc, char **argv) {
 
     if (!strcmp(argv[2], "--json")) {
         options.mode = CLI_MODE_JSON;
-        options.json_sub_mode = CLI_MODE_QUERY;
         int idx = 3;
         if (idx >= argc) {
             fail("expected input and output json file paths: --json <input.json> "
@@ -489,58 +530,42 @@ static CliOptions parse_cli_options(int argc, char **argv) {
         }
 
         while (idx < argc) {
-            if (!strcmp(argv[idx], "--mode") || !strcmp(argv[idx], "-m")) {
-                if (++idx >= argc) {
-                    fail("expected mode after --mode (query or generate)");
-                }
-                const char *m = argv[idx++];
-                if (!strcmp(m, "generate") || !strcmp(m, "gen")) {
-                    options.json_sub_mode = CLI_MODE_GENERATE;
-                } else if (!strcmp(m, "query") || !strcmp(m, "pipeline")) {
-                    options.json_sub_mode = CLI_MODE_QUERY;
-                } else {
-                    fail("invalid mode for --json: choose 'query' or 'generate'");
-                }
-            } else if (!strcmp(argv[idx], "--generate") ||
-                       !strcmp(argv[idx], "--gen")) {
-                options.json_sub_mode = CLI_MODE_GENERATE;
-                idx++;
-            } else if (!strcmp(argv[idx], "--query") || !strcmp(argv[idx], "-q")) {
-                options.json_sub_mode = CLI_MODE_QUERY;
-                idx++;
-            } else if (!strcmp(argv[idx], "-o") || !strcmp(argv[idx], "--out") ||
-                       !strcmp(argv[idx], "--output")) {
+            if (!strcmp(argv[idx], "-o") || !strcmp(argv[idx], "--out") ||
+                !strcmp(argv[idx], "--output")) {
                 if (++idx >= argc) {
                     fail("expected output file path after -o/--output");
                 }
                 options.output_json_path = argv[idx++];
             } else if (!strcmp(argv[idx], "--db") || !strcmp(argv[idx], "-b")) {
                 if (++idx >= argc) {
-                    fail("unknown mode or invalid arguments");
+                    fail("expected db path after --db");
                 }
                 options.db_path = argv[idx++];
             } else if (!strcmp(argv[idx], "--strategy") || !strcmp(argv[idx], "-s")) {
                 if (++idx >= argc) {
-                    fail("unknown mode or invalid arguments");
+                    fail("expected strategy after --strategy");
                 }
                 options.strategy = argv[idx++];
+                options.strategy_specified = 1;
             } else if (!strcmp(argv[idx], "--dim") || !strcmp(argv[idx], "-d")) {
                 if (++idx >= argc) {
-                    fail("unknown mode or invalid arguments");
+                    fail("expected dimension after --dim");
                 }
                 options.dim = parse_nonnegative_integer(argv[idx++]);
                 options.dim_specified = 1;
             } else if (!strcmp(argv[idx], "--threshold") || !strcmp(argv[idx], "-t")) {
                 if (++idx >= argc) {
-                    fail("unknown mode or invalid arguments");
+                    fail("expected threshold after --threshold");
                 }
                 options.threshold = atof(argv[idx++]);
+                options.threshold_specified = 1;
             } else if (!strcmp(argv[idx], "--max-tokens") ||
                        !strcmp(argv[idx], "--max-new-tokens")) {
                 if (++idx >= argc) {
-                    fail("unknown mode or invalid arguments");
+                    fail("expected token count after --max-tokens");
                 }
                 options.max_new_tokens = parse_nonnegative_integer(argv[idx++]);
+                options.max_new_tokens_specified = 1;
             } else {
                 fail("unknown mode or invalid arguments");
             }
@@ -550,7 +575,11 @@ static CliOptions parse_cli_options(int argc, char **argv) {
             fail("expected output json file path: --json <input.json> <output.json>");
         }
 
-        validate_strategy_and_dim(options.strategy, options.dim, options.dim_specified);
+        validate_postprocess_options(
+            options.strategy, options.strategy_specified, options.db_path, options.dim,
+            options.dim_specified, options.threshold, options.threshold_specified,
+            options.max_new_tokens, options.max_new_tokens_specified, 1);
+
         return options;
     }
 
@@ -560,7 +589,6 @@ static CliOptions parse_cli_options(int argc, char **argv) {
 
     if ((is_gen || is_query) && argc >= 5 && !strcmp(argv[3], "--json")) {
         options.mode = CLI_MODE_JSON;
-        options.json_sub_mode = is_gen ? CLI_MODE_GENERATE : CLI_MODE_QUERY;
         options.input_json_path = argv[4];
         int idx = 5;
         if (idx < argc && argv[idx][0] != '-') {
@@ -575,31 +603,34 @@ static CliOptions parse_cli_options(int argc, char **argv) {
                 options.output_json_path = argv[idx++];
             } else if (!strcmp(argv[idx], "--db") || !strcmp(argv[idx], "-b")) {
                 if (++idx >= argc) {
-                    fail("unknown mode or invalid arguments");
+                    fail("expected db path after --db");
                 }
                 options.db_path = argv[idx++];
             } else if (!strcmp(argv[idx], "--strategy") || !strcmp(argv[idx], "-s")) {
                 if (++idx >= argc) {
-                    fail("unknown mode or invalid arguments");
+                    fail("expected strategy after --strategy");
                 }
                 options.strategy = argv[idx++];
+                options.strategy_specified = 1;
             } else if (!strcmp(argv[idx], "--dim") || !strcmp(argv[idx], "-d")) {
                 if (++idx >= argc) {
-                    fail("unknown mode or invalid arguments");
+                    fail("expected dimension after --dim");
                 }
                 options.dim = parse_nonnegative_integer(argv[idx++]);
                 options.dim_specified = 1;
             } else if (!strcmp(argv[idx], "--threshold") || !strcmp(argv[idx], "-t")) {
                 if (++idx >= argc) {
-                    fail("unknown mode or invalid arguments");
+                    fail("expected threshold after --threshold");
                 }
                 options.threshold = atof(argv[idx++]);
+                options.threshold_specified = 1;
             } else if (!strcmp(argv[idx], "--max-tokens") ||
                        !strcmp(argv[idx], "--max-new-tokens")) {
                 if (++idx >= argc) {
-                    fail("unknown mode or invalid arguments");
+                    fail("expected token count after --max-tokens");
                 }
                 options.max_new_tokens = parse_nonnegative_integer(argv[idx++]);
+                options.max_new_tokens_specified = 1;
             } else {
                 fail("unknown mode or invalid arguments");
             }
@@ -607,90 +638,98 @@ static CliOptions parse_cli_options(int argc, char **argv) {
         if (!options.output_json_path) {
             fail("expected output json file path: --json <input.json> <output.json>");
         }
-        validate_strategy_and_dim(options.strategy, options.dim, options.dim_specified);
+        if (is_gen && !options.strategy_specified) {
+            options.strategy = "none";
+            options.strategy_specified = 1;
+        }
+        validate_postprocess_options(
+            options.strategy, options.strategy_specified, options.db_path, options.dim,
+            options.dim_specified, options.threshold, options.threshold_specified,
+            options.max_new_tokens, options.max_new_tokens_specified, 1);
+        return options;
+    }
+
+    /* Support classic positional arguments for contract v2 fixture test suite:
+     * sql-cli MODEL --generate TEXT [BUDGET]
+     */
+    if (is_gen && (argc == 4 || argc == 5) && (argc == 4 || argv[4][0] != '-')) {
+        options.mode = CLI_MODE_GENERATE;
+        options.text = argv[3];
+        options.strategy = "none";
+        options.strategy_specified = 1;
+        options.max_new_tokens =
+            (argc == 5) ? parse_nonnegative_integer(argv[4]) : DEFAULT_MAX_NEW_TOKENS;
+        options.max_new_tokens_specified = 1;
         return options;
     }
 
     if (is_gen || is_query) {
-        options.mode = is_gen ? CLI_MODE_GENERATE : CLI_MODE_QUERY;
+        options.mode = CLI_MODE_QUERY;
         if (argc < 4) {
             fail("unknown mode or invalid arguments");
         }
         options.text = argv[3];
 
         int idx = 4;
-        /* Support classic positional arguments first for backward compatibility */
-        if (idx < argc && argv[idx][0] != '-') {
-            if (is_gen) {
-                if (argc == 5) {
-                    options.max_new_tokens = parse_nonnegative_integer(argv[4]);
-                    return options;
-                } else {
-                    fail("unknown mode or invalid arguments");
-                }
-            } else {
-                /* is_query */
-                char *end;
-                errno = 0;
-                long val = strtol(argv[4], &end, 10);
-                if (*end == '\0' && val >= 0) {
-                    options.max_new_tokens = (int)val;
-                    idx++;
-                } else {
-                    options.db_path = argv[4];
-                    idx++;
-                    if (idx < argc && argv[idx][0] != '-') {
-                        options.max_new_tokens = parse_nonnegative_integer(argv[idx]);
-                        idx++;
-                    }
-                }
-                if (idx == argc) {
-                    return options;
-                }
-            }
-        }
-
         /* Parse explicit flag arguments */
         while (idx < argc) {
             if (!strcmp(argv[idx], "--db") || !strcmp(argv[idx], "-b")) {
                 if (++idx >= argc) {
-                    fail("unknown mode or invalid arguments");
+                    fail("expected db path after --db");
                 }
                 options.db_path = argv[idx++];
             } else if (!strcmp(argv[idx], "--strategy") || !strcmp(argv[idx], "-s")) {
                 if (++idx >= argc) {
-                    fail("unknown mode or invalid arguments");
+                    fail("expected strategy after --strategy");
                 }
                 options.strategy = argv[idx++];
+                options.strategy_specified = 1;
             } else if (!strcmp(argv[idx], "--dim") || !strcmp(argv[idx], "-d")) {
                 if (++idx >= argc) {
-                    fail("unknown mode or invalid arguments");
+                    fail("expected dimension after --dim");
                 }
                 options.dim = parse_nonnegative_integer(argv[idx++]);
                 options.dim_specified = 1;
             } else if (!strcmp(argv[idx], "--threshold") || !strcmp(argv[idx], "-t")) {
                 if (++idx >= argc) {
-                    fail("unknown mode or invalid arguments");
+                    fail("expected threshold after --threshold");
                 }
                 options.threshold = atof(argv[idx++]);
+                options.threshold_specified = 1;
             } else if (!strcmp(argv[idx], "--max-tokens") ||
                        !strcmp(argv[idx], "--max-new-tokens")) {
                 if (++idx >= argc) {
-                    fail("unknown mode or invalid arguments");
+                    fail("expected token count after --max-tokens");
                 }
                 options.max_new_tokens = parse_nonnegative_integer(argv[idx++]);
+                options.max_new_tokens_specified = 1;
             } else {
                 fail("unknown mode or invalid arguments");
             }
         }
 
-        validate_strategy_and_dim(options.strategy, options.dim, options.dim_specified);
+        if (is_gen && !options.strategy_specified) {
+            options.strategy = "none";
+            options.strategy_specified = 1;
+        }
+
+        validate_postprocess_options(
+            options.strategy, options.strategy_specified, options.db_path, options.dim,
+            options.dim_specified, options.threshold, options.threshold_specified,
+            options.max_new_tokens, options.max_new_tokens_specified, 1);
         return options;
     }
 
     fail("unknown mode or invalid arguments");
     return options;
 }
+
+static int process_json_file(const Model *model, const char *input_path,
+                             const char *output_path, CliMode exec_mode,
+                             char **active_dict, size_t active_dict_size,
+                             const char *strategy, int dim, double threshold,
+                             int max_tokens, const char *model_path,
+                             const char *db_path);
 
 static int run_standalone_postprocess(int argc, char **argv) {
     if (argc < 2) {
@@ -702,27 +741,52 @@ static int run_standalone_postprocess(int argc, char **argv) {
     if (argc < 3) {
         fprintf(
             stderr,
-            "usage: %s --postprocess SQL [--db PATH] [--strategy STRATS] [--dim DIM]\n",
-            argv[0]);
+            "usage: %s --postprocess SQL --strategy <none|keyword|typo|ngram|semantic> "
+            "[--db PATH] [--dim DIM] [--threshold FLOAT]\n"
+            "       %s --postprocess --json INPUT.json OUTPUT.json --strategy "
+            "<none|keyword|typo|ngram|semantic> [--db PATH] [--dim DIM] [--threshold "
+            "FLOAT]\n",
+            argv[0], argv[0]);
         exit(2);
     }
-    const char *sql = argv[2];
+
+    int is_json = !strcmp(argv[2], "--json");
+    const char *input_json = NULL;
+    const char *output_json = NULL;
+    const char *sql = NULL;
+    int idx = 2;
+
+    if (is_json) {
+        idx = 3;
+        if (idx >= argc) {
+            fail("expected input and output json file paths: --postprocess --json "
+                 "<input.json> <output.json>");
+        }
+        input_json = argv[idx++];
+        if (idx < argc && argv[idx][0] != '-') {
+            output_json = argv[idx++];
+        }
+    } else {
+        sql = argv[2];
+        idx = 3;
+    }
+
     const char *db_path = NULL;
-    const char *strategy = "typo,ngram";
+    const char *strategy = NULL;
+    int strategy_specified = 0;
     int dim = 0;
     int dim_specified = 0;
     double threshold = 0.0;
+    int threshold_specified = 0;
 
-    int idx = 3;
-    /* Legacy positional: [db_path] [strategy] */
-    if (idx < argc && argv[idx][0] != '-') {
-        db_path = argv[idx++];
-        if (idx < argc && argv[idx][0] != '-') {
-            strategy = argv[idx++];
-        }
-    }
     while (idx < argc) {
-        if (!strcmp(argv[idx], "--db") || !strcmp(argv[idx], "-b")) {
+        if (!strcmp(argv[idx], "-o") || !strcmp(argv[idx], "--out") ||
+            !strcmp(argv[idx], "--output")) {
+            if (++idx >= argc) {
+                fail("expected output file path after -o/--output");
+            }
+            output_json = argv[idx++];
+        } else if (!strcmp(argv[idx], "--db") || !strcmp(argv[idx], "-b")) {
             if (++idx >= argc) {
                 fail("expected path after --db");
             }
@@ -732,6 +796,7 @@ static int run_standalone_postprocess(int argc, char **argv) {
                 fail("expected strategy list after --strategy");
             }
             strategy = argv[idx++];
+            strategy_specified = 1;
         } else if (!strcmp(argv[idx], "--dim") || !strcmp(argv[idx], "-d")) {
             if (++idx >= argc) {
                 fail("expected dimension after --dim");
@@ -743,12 +808,31 @@ static int run_standalone_postprocess(int argc, char **argv) {
                 fail("expected threshold after --threshold");
             }
             threshold = atof(argv[idx++]);
+            threshold_specified = 1;
         } else {
             fail("unknown option in postprocess");
         }
     }
 
-    validate_strategy_and_dim(strategy, dim, dim_specified);
+    if (is_json && !output_json) {
+        fail("expected output json file path: --postprocess --json <input.json> "
+             "<output.json>");
+    }
+
+    validate_postprocess_options(strategy, strategy_specified, db_path, dim,
+                                 dim_specified, threshold, threshold_specified, 0, 0,
+                                 0);
+
+    if (is_json) {
+        int rc = process_json_file(NULL, input_json, output_json, CLI_MODE_POSTPROCESS,
+                                   NULL, 0, strategy, dim, threshold, 0, NULL, db_path);
+        if (rc != 0) {
+            fail("failed to process json file");
+        }
+        free_semantic_cache();
+        return 1;
+    }
+
     try_configure_semantic_path(db_path, dim);
 
     char **dictionary = NULL;
@@ -857,11 +941,14 @@ static void run_query_command(const Model *model, const CliOptions *options) {
 
     try_configure_semantic_path(
         options->db_path ? options->db_path : options->model_path, options->dim);
-    const char *strategy = options->strategy ? options->strategy : "typo,ngram";
-    char *fixed_sql = process_sql(raw_sql, strategy, (const char **)dictionary,
+    PostprocessLevel lvl = POSTPROCESS_LEVEL_NONE;
+    parse_postprocess_level(options->strategy, &lvl);
+    char *fixed_sql = process_sql(raw_sql, options->strategy, (const char **)dictionary,
                                   dict_size, options->dim, options->threshold);
 
-    fprintf(stderr, "[model] %s\n", raw_sql);
+    if (lvl != POSTPROCESS_LEVEL_NONE) {
+        fprintf(stderr, "[model] %s\n", raw_sql);
+    }
     if (fixed_sql) {
         printf("%s\n", fixed_sql);
         free(fixed_sql);
@@ -894,26 +981,41 @@ static int process_json_file(const Model *model, const char *input_path,
     }
 
     int is_array = 0;
-    size_t question_count = 0;
-    char **questions =
-        extract_all_json_questions(json_text, &question_count, &is_array);
+    size_t count = 0;
+    char **items = NULL;
+    int has_questions = 0;
+
+    if (exec_mode == CLI_MODE_POSTPROCESS) {
+        items = extract_all_json_strings_by_key(json_text, "sql", &count, &is_array);
+        if (count == 0) {
+            if (items) {
+                free(items);
+            }
+            items = extract_all_json_strings_by_key(json_text, "question", &count,
+                                                    &is_array);
+            has_questions = (count > 0);
+        }
+    } else {
+        items = extract_all_json_questions(json_text, &count, &is_array);
+        has_questions = 1;
+    }
     free(json_text);
 
-    if (question_count == 0) {
-        if (questions) {
-            free(questions);
+    if (count == 0) {
+        if (items) {
+            free(items);
         }
-        fprintf(stderr, "error: no 'question' field found in input JSON file '%s'\n",
-                input_path);
+        fprintf(stderr, "error: no '%s' field found in input JSON file '%s'\n",
+                (exec_mode == CLI_MODE_POSTPROCESS ? "sql" : "question"), input_path);
         return -1;
     }
 
     FILE *out = open_file_utf8(output_path, "wb");
     if (!out) {
-        for (size_t i = 0; i < question_count; i++) {
-            free(questions[i]);
+        for (size_t i = 0; i < count; i++) {
+            free(items[i]);
         }
-        free(questions);
+        free(items);
         fprintf(stderr, "error: failed to open output JSON file '%s' for writing\n",
                 output_path);
         return -1;
@@ -934,47 +1036,81 @@ static int process_json_file(const Model *model, const char *input_path,
     }
 
     try_configure_semantic_path(db_path && *db_path ? db_path : model_path, dim);
-    const char *strat = (strategy && *strategy) ? strategy : "typo,ngram";
+    const char *strat = (strategy && *strategy) ? strategy : "none";
 
-    int use_array = (is_array || question_count > 1);
+    int use_array = (is_array || count > 1);
     if (use_array) {
         fputs("[\n", out);
     }
 
-    for (size_t q_idx = 0; q_idx < question_count; q_idx++) {
-        const char *question = questions[q_idx];
+    for (size_t idx = 0; idx < count; idx++) {
+        const char *item = items[idx];
+        char *final_sql = NULL;
 
-        int *token_ids = allocate_array(model->config.context_length, sizeof(int));
-        int prompt_count = prepare_prompt_tokens(model, question, token_ids);
-        int token_count = prompt_count;
-        int tokens_to_gen = max_tokens > 0 ? max_tokens : DEFAULT_MAX_NEW_TOKENS;
-        const char *stop_reason =
-            generate_tokens(model, token_ids, &token_count, tokens_to_gen);
-        (void)stop_reason;
+        if (exec_mode == CLI_MODE_POSTPROCESS) {
+            char *fixed_sql = process_sql(item, strat, (const char **)dictionary,
+                                          dict_size, dim, threshold);
+            if (fixed_sql && strncmp(fixed_sql, "Error:", 6) != 0) {
+                final_sql = fixed_sql;
+            } else {
+                size_t ilen = strlen(item);
+                final_sql = (char *)malloc(ilen + 1);
+                if (final_sql) {
+                    memcpy(final_sql, item, ilen + 1);
+                }
+                if (fixed_sql) {
+                    free(fixed_sql);
+                }
+            }
+        } else {
+            if (!model) {
+                fprintf(stderr, "error: model is required for query generation\n");
+                fclose(out);
+                for (size_t i = idx; i < count; i++) {
+                    free(items[i]);
+                }
+                free(items);
+                if (own_dict && dictionary) {
+                    free_dictionary(dictionary, dict_size);
+                }
+                return -1;
+            }
+            int *token_ids = allocate_array(model->config.context_length, sizeof(int));
+            int prompt_count = prepare_prompt_tokens(model, item, token_ids);
+            int token_count = prompt_count;
+            int tokens_to_gen = max_tokens > 0 ? max_tokens : DEFAULT_MAX_NEW_TOKENS;
+            const char *stop_reason =
+                generate_tokens(model, token_ids, &token_count, tokens_to_gen);
+            (void)stop_reason;
 
-        size_t raw_sql_len = 0;
-        for (int index = prompt_count; index < token_count; index++) {
-            int token_id = token_ids[index];
-            raw_sql_len += model->tokenizer.token_byte_lengths[token_id];
-        }
-        char *raw_sql = allocate_array(raw_sql_len + 1, 1);
-        size_t offset = 0;
-        for (int index = prompt_count; index < token_count; index++) {
-            int token_id = token_ids[index];
-            size_t len = model->tokenizer.token_byte_lengths[token_id];
-            memcpy(raw_sql + offset, model->tokenizer.token_bytes[token_id], len);
-            offset += len;
-        }
-        raw_sql[raw_sql_len] = '\0';
-        free(token_ids);
+            size_t raw_sql_len = 0;
+            for (int t = prompt_count; t < token_count; t++) {
+                int token_id = token_ids[t];
+                raw_sql_len += model->tokenizer.token_byte_lengths[token_id];
+            }
+            char *raw_sql = allocate_array(raw_sql_len + 1, 1);
+            size_t offset = 0;
+            for (int t = prompt_count; t < token_count; t++) {
+                int token_id = token_ids[t];
+                size_t len = model->tokenizer.token_byte_lengths[token_id];
+                memcpy(raw_sql + offset, model->tokenizer.token_bytes[token_id], len);
+                offset += len;
+            }
+            raw_sql[raw_sql_len] = '\0';
+            free(token_ids);
 
-        char *fixed_sql = NULL;
-        if (exec_mode != CLI_MODE_GENERATE && dictionary && dict_size > 0) {
-            fixed_sql = process_sql(raw_sql, strat, (const char **)dictionary,
-                                    dict_size, dim, threshold);
+            char *fixed_sql = process_sql(raw_sql, strat, (const char **)dictionary,
+                                          dict_size, dim, threshold);
+            if (fixed_sql && strncmp(fixed_sql, "Error:", 6) != 0) {
+                final_sql = fixed_sql;
+                free(raw_sql);
+            } else {
+                final_sql = raw_sql;
+                if (fixed_sql) {
+                    free(fixed_sql);
+                }
+            }
         }
-        const char *final_sql =
-            (fixed_sql && strncmp(fixed_sql, "Error:", 6) != 0) ? fixed_sql : raw_sql;
 
         const char *indent = use_array ? "  " : "";
         if (use_array) {
@@ -982,14 +1118,20 @@ static int process_json_file(const Model *model, const char *input_path,
         } else {
             fputs("{\n", out);
         }
-        fprintf(out, "%s  \"question\": ", indent);
-        print_json_escaped_string(out, question);
-        fprintf(out, ",\n%s  \"sql\": ", indent);
-        print_json_escaped_string(out, final_sql);
+
+        if (has_questions) {
+            fprintf(out, "%s  \"question\": ", indent);
+            print_json_escaped_string(out, item);
+            fprintf(out, ",\n%s  \"sql\": ", indent);
+            print_json_escaped_string(out, final_sql ? final_sql : "");
+        } else {
+            fprintf(out, "%s  \"sql\": ", indent);
+            print_json_escaped_string(out, final_sql ? final_sql : "");
+        }
         fprintf(out, "\n%s}", indent);
 
         if (use_array) {
-            if (q_idx + 1 < question_count) {
+            if (idx + 1 < count) {
                 fputs(",\n", out);
             } else {
                 fputs("\n", out);
@@ -998,11 +1140,10 @@ static int process_json_file(const Model *model, const char *input_path,
             fputs("\n", out);
         }
 
-        if (fixed_sql) {
-            free(fixed_sql);
+        if (final_sql) {
+            free(final_sql);
         }
-        free(raw_sql);
-        free(questions[q_idx]);
+        free(items[idx]);
     }
 
     if (use_array) {
@@ -1010,7 +1151,7 @@ static int process_json_file(const Model *model, const char *input_path,
     }
 
     fclose(out);
-    free(questions);
+    free(items);
 
     if (own_dict && dictionary) {
         free_dictionary(dictionary, dict_size);
@@ -1024,13 +1165,10 @@ static void run_json_command(const Model *model, const CliOptions *options) {
              "<output.json>");
     }
 
-    CliMode exec_mode = (options->json_sub_mode == CLI_MODE_GENERATE)
-                            ? CLI_MODE_GENERATE
-                            : CLI_MODE_QUERY;
     int rc = process_json_file(
-        model, options->input_json_path, options->output_json_path, exec_mode, NULL, 0,
-        options->strategy, options->dim, options->threshold, options->max_new_tokens,
-        options->model_path, options->db_path);
+        model, options->input_json_path, options->output_json_path, CLI_MODE_QUERY,
+        NULL, 0, options->strategy, options->dim, options->threshold,
+        options->max_new_tokens, options->model_path, options->db_path);
     if (rc != 0) {
         fail("failed to process json file");
     }
@@ -1045,19 +1183,26 @@ static void print_shell_status(const char *model_path, int model_loaded,
                                const char *db_path, size_t dict_size,
                                const char *strategy, int dim, double threshold,
                                int max_tokens, CliMode mode) {
+    PostprocessLevel level = POSTPROCESS_LEVEL_NONE;
+    parse_postprocess_level(strategy, &level);
+
     printf("\n--- Current Configuration ---\n");
     printf("  Model:       %s %s\n", model_path[0] ? model_path : "(none)",
            model_loaded ? "[Loaded]" : "[Not loaded]");
     printf("  Database:    %s (Schema items: %zu)\n", db_path[0] ? db_path : "(none)",
            dict_size);
-    printf("  Strategy:    %s\n", strategy);
+    printf("  Strategy:    %s (Level %d: %s)\n", strategy, (int)level,
+           level == POSTPROCESS_LEVEL_NONE
+               ? "none (raw model output, no postprocessing)"
+           : level == POSTPROCESS_LEVEL_KEYWORD ? "keyword (reserved keywords only)"
+           : level == POSTPROCESS_LEVEL_TYPO    ? "keyword + typo"
+           : level == POSTPROCESS_LEVEL_NGRAM   ? "keyword + typo + ngram"
+                                                : "keyword + typo + ngram + semantic");
     printf("  Dimension:   %d\n", dim);
     printf("  Threshold:   %.2f\n", threshold);
     printf("  Max Tokens:  %d\n", max_tokens);
     const char *mode_str = "query";
-    if (mode == CLI_MODE_GENERATE) {
-        mode_str = "generate";
-    } else if (mode == CLI_MODE_POSTPROCESS) {
+    if (mode == CLI_MODE_POSTPROCESS) {
         mode_str = "postprocess";
     } else if (mode == CLI_MODE_ENCODE) {
         mode_str = "encode";
@@ -1476,13 +1621,17 @@ static void print_shell_help(void) {
         "  /set model <path>      Load GGUF neural model (e.g. /set model model.gguf)\n"
         "  /set embedding <dim>   Set GloVe vector dimension (50, 100, 200, 300. "
         "Default: 300)\n"
-        "  /set strategy <strats> Set correction strategies (e.g. "
-        "typo,ngram,semantic)\n"
+        "  /set strategy <strat>  Set cascading strategy: none, keyword, typo, ngram, "
+        "semantic\n"
+        "                         (Cascading order: none -> keyword -> typo -> ngram "
+        "-> semantic)\n"
         "  /set threshold <float> Set semantic similarity threshold (default: 0.5)\n"
         "  /set tokens <number>   Set max new tokens to generate (default: 32)\n"
-        "  /set mode <mode>       Switch mode: query (default), gen, post, enc\n"
-        "  /json <in> <out>       Process input JSON file using current mode, "
-        "database, and strategy\n"
+        "  /set mode <mode>       Switch mode: query (default), post, enc\n"
+        "                         (Note: for raw generation without postprocessing, "
+        "use '/set strategy none')\n"
+        "  /json <in> <out>       Process input JSON file using current database, "
+        "strategy, and tokens\n"
         "  /ls [path|type]        Inspect directory and list asset bundles (/set "
         "asset),\n"
         "                         models (*.gguf), databases (*.db), and embeddings "
@@ -1696,17 +1845,29 @@ static void run_interactive_shell(const char *initial_model_path,
                            !strncmp(sub, "strat ", 6)) {
                     char *new_strat =
                         trim_string(sub + (!strncmp(sub, "strategy ", 9) ? 9 : 6));
-                    if (*new_strat) {
+                    PostprocessLevel level;
+                    if (*new_strat && parse_postprocess_level(new_strat, &level) == 0) {
                         strncpy(strategy, new_strat, sizeof(strategy) - 1);
-                        printf("Strategy set to: %s\n", strategy);
-                        if (strstr(strategy, "semantic") != NULL && !dim_specified) {
+                        printf("Strategy set to: %s (Level %d: %s)\n", strategy,
+                               (int)level,
+                               level == POSTPROCESS_LEVEL_NONE
+                                   ? "none (raw model output, no postprocessing)"
+                               : level == POSTPROCESS_LEVEL_KEYWORD
+                                   ? "keyword (reserved keywords only)"
+                               : level == POSTPROCESS_LEVEL_TYPO ? "keyword + typo"
+                               : level == POSTPROCESS_LEVEL_NGRAM
+                                   ? "keyword + typo + ngram"
+                                   : "keyword + typo + ngram + semantic");
+                        if (level == POSTPROCESS_LEVEL_SEMANTIC && !dim_specified) {
                             printf("Note: 'semantic' strategy requires embedding "
                                    "dimension. Set using '/set embedding "
                                    "<50|100|200|300>'.\n");
                         }
                     } else {
-                        printf("Usage: /set strategy "
-                               "<typo|ngram|semantic|comma-separated>\n");
+                        printf(
+                            "Usage: /set strategy <none|keyword|typo|ngram|semantic>\n"
+                            "Cascading stages in order: none -> keyword -> typo -> "
+                            "ngram -> semantic\n");
                     }
                 } else if (!strncmp(sub, "threshold ", 10) || !strncmp(sub, "th ", 3)) {
                     char *val_str =
@@ -1725,10 +1886,13 @@ static void run_interactive_shell(const char *initial_model_path,
                     char *m = trim_string(sub + 5);
                     if (!strcmp(m, "query") || !strcmp(m, "pipeline")) {
                         mode = CLI_MODE_QUERY;
-                        printf("Mode switched to: query (generate + post-process)\n");
+                        printf("Mode switched to: query (generate + cascading "
+                               "postprocessing)\n");
                     } else if (!strcmp(m, "gen") || !strcmp(m, "generate")) {
-                        mode = CLI_MODE_GENERATE;
-                        printf("Mode switched to: generate (raw model output)\n");
+                        mode = CLI_MODE_QUERY;
+                        strncpy(strategy, "none", sizeof(strategy) - 1);
+                        printf("Mode switched to: query with strategy 'none' (raw "
+                               "model output, no postprocessing)\n");
                     } else if (!strcmp(m, "post") || !strcmp(m, "postprocess")) {
                         mode = CLI_MODE_POSTPROCESS;
                         printf("Mode switched to: postprocess (SQL correction only)\n");
@@ -1736,8 +1900,7 @@ static void run_interactive_shell(const char *initial_model_path,
                         mode = CLI_MODE_ENCODE;
                         printf("Mode switched to: encode (BPE tokenizer)\n");
                     } else {
-                        printf("Unknown mode '%s'. Choose: query, gen, post, encode\n",
-                               m);
+                        printf("Unknown mode '%s'. Choose: query, post, enc\n", m);
                     }
                 } else {
                     printf("Unknown setting '%s'. Supported: /set asset, /set db, /set "
@@ -1829,16 +1992,15 @@ static void run_interactive_shell(const char *initial_model_path,
                         printf("Error: Model is not loaded. Use '/set model <path>' "
                                "first.\n\n");
                     } else {
-                        const char *cur_mode_str = (mode == CLI_MODE_GENERATE)
-                                                       ? "generate (raw SQL)"
-                                                       : "query (with postprocessing)";
+                        PostprocessLevel lvl = POSTPROCESS_LEVEL_NONE;
+                        parse_postprocess_level(strategy, &lvl);
                         printf("Processing JSON: '%s' -> '%s'\n", in_path, out_path);
-                        printf("  Mode:     %s\n", cur_mode_str);
+                        printf("  Strategy: %s (Level %d)\n", strategy, (int)lvl);
                         printf("  Database: %s\n", db_path[0] ? db_path : "(none)");
-                        printf("  Strategy: %s\n", strategy);
-                        int rc = process_json_file(
-                            &model, in_path, out_path, mode, dictionary, dict_size,
-                            strategy, dim, threshold, max_tokens, model_path, db_path);
+                        int rc = process_json_file(model_loaded ? &model : NULL,
+                                                   in_path, out_path, mode, dictionary,
+                                                   dict_size, strategy, dim, threshold,
+                                                   max_tokens, model_path, db_path);
                         if (rc == 0) {
                             printf("Successfully wrote results to '%s'\n\n", out_path);
                         } else {
@@ -1847,10 +2009,9 @@ static void run_interactive_shell(const char *initial_model_path,
                     }
                 } else {
                     printf("Usage: /json <input.json> <output.json>\n"
-                           "Note: Reflects active mode (%s), database (%s), and "
-                           "strategy (%s).\n\n",
-                           mode == CLI_MODE_GENERATE ? "generate" : "query",
-                           db_path[0] ? db_path : "none", strategy);
+                           "Note: Reflects active database (%s), strategy (%s), and "
+                           "tokens (%d).\n\n",
+                           db_path[0] ? db_path : "none", strategy, max_tokens);
                 }
             } else {
                 printf("Unknown command '%s'. Type '/help' for available commands.\n",
@@ -1943,8 +2104,14 @@ static void run_interactive_shell(const char *initial_model_path,
             try_configure_semantic_path(db_path[0] ? db_path : model_path, dim);
             char *fixed_sql = process_sql(raw_sql, strategy, (const char **)dictionary,
                                           dict_size, dim, threshold);
-            printf("[model] %s (stop=%s)\n", raw_sql, stop_reason);
-            printf("===> %s\n\n", fixed_sql ? fixed_sql : raw_sql);
+            PostprocessLevel lvl = POSTPROCESS_LEVEL_NONE;
+            parse_postprocess_level(strategy, &lvl);
+            if (lvl == POSTPROCESS_LEVEL_NONE) {
+                printf("===> %s (stop=%s)\n\n", raw_sql, stop_reason);
+            } else {
+                printf("[model] %s (stop=%s)\n", raw_sql, stop_reason);
+                printf("===> %s\n\n", fixed_sql ? fixed_sql : raw_sql);
+            }
 
             if (fixed_sql) {
                 free(fixed_sql);

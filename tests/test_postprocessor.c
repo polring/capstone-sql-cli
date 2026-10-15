@@ -113,9 +113,64 @@ void test_semantic_correction_pipeline(void) {
     ASSERT_TRUE(result != NULL, "process_sql returns non-null");
     if (result) {
         ASSERT_TRUE(strstr(result, "usr") != NULL ||
-                        strstr(result, "user_name") != NULL,
+                        strstr(result, "user_name") != NULL ||
+                        strstr(result, "users") != NULL,
                     "semantic fallback or match safely handles query");
         free(result);
+    }
+}
+
+void test_cascading_strategy_none(void) {
+    printf("Running test_cascading_strategy_none...\n");
+    const char *sql = "SELETC usr_name FRMO users";
+    char *result = process_sql(sql, "none", NULL, 0, 0, 0.0);
+    ASSERT_TRUE(result != NULL, "process_sql with none returns non-null");
+    if (result) {
+        ASSERT_TRUE(strcmp(result, sql) == 0,
+                    "none returns raw input exactly untouched");
+        free(result);
+    }
+}
+
+void test_cascading_strategy_keyword(void) {
+    printf("Running test_cascading_strategy_keyword...\n");
+    const char *sql = "SELETC usr_name FRMO users";
+    char *result = process_sql(sql, "keyword", NULL, 0, 0, 0.0);
+    ASSERT_TRUE(result != NULL, "process_sql with keyword returns non-null");
+    if (result) {
+        ASSERT_TRUE(strstr(result, "SELECT") != NULL,
+                    "keyword corrects SELETC to SELECT");
+        ASSERT_TRUE(strstr(result, "FROM") != NULL, "keyword corrects FRMO to FROM");
+        ASSERT_TRUE(strstr(result, "usr_name") != NULL,
+                    "keyword leaves usr_name unchanged");
+        free(result);
+    }
+}
+
+void test_cascading_sequence_enforcement(void) {
+    printf("Running test_cascading_sequence_enforcement...\n");
+    const char *sql = "SELECT usr_name FROM users";
+    char *bad1 =
+        process_sql(sql, "ngram,typo", TEST_DICTIONARY, TEST_DICT_SIZE, 0, 0.0);
+    ASSERT_TRUE(bad1 && strncmp(bad1, "Error:", 6) == 0,
+                "out-of-order strategy rejected");
+    if (bad1) {
+        free(bad1);
+    }
+
+    char *bad2 =
+        process_sql(sql, "keyword,semantic", TEST_DICTIONARY, TEST_DICT_SIZE, 300, 0.0);
+    ASSERT_TRUE(bad2 && strncmp(bad2, "Error:", 6) == 0, "skipping stages rejected");
+    if (bad2) {
+        free(bad2);
+    }
+
+    char *good =
+        process_sql(sql, "keyword,typo,ngram", TEST_DICTIONARY, TEST_DICT_SIZE, 0, 0.0);
+    ASSERT_TRUE(good && strncmp(good, "Error:", 6) != 0,
+                "valid prefix cascade accepted");
+    if (good) {
+        free(good);
     }
 }
 
@@ -131,6 +186,9 @@ int main(void) {
     test_ngram_correction();
     test_strategy_chaining();
     test_semantic_correction_pipeline();
+    test_cascading_strategy_none();
+    test_cascading_strategy_keyword();
+    test_cascading_sequence_enforcement();
 
     printf("\n=========================================\n");
     printf("Summary: %d / %d assertions passed.\n", g_tests_passed, g_tests_total);

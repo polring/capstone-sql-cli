@@ -671,3 +671,66 @@ void correct_identifiers(TokenStream *stream, const char **dictionary, size_t di
         }
     }
 }
+
+void correct_identifiers_by_level(TokenStream *stream, const char **dictionary,
+                                  size_t dict_size, PostprocessLevel level, int dim,
+                                  double threshold) {
+    if (!stream || !dictionary || dict_size == 0 || level < POSTPROCESS_LEVEL_TYPO) {
+        return;
+    }
+
+    for (size_t i = 0; i < stream->count; i++) {
+        SqlToken *tok = &stream->tokens[i];
+        if (tok->type != TOKEN_IDENTIFIER) {
+            continue;
+        }
+
+        char check_name[128];
+        to_lower_str(tok->text, check_name, sizeof(check_name));
+
+        const char *corrected_name = check_name;
+
+        /* Stage 2: Typo correction (Level >= 2) */
+        if (level >= POSTPROCESS_LEVEL_TYPO) {
+            const char *new_name =
+                typo_correction(corrected_name, dictionary, dict_size);
+            if (strcmp(new_name, corrected_name) != 0) {
+                corrected_name = new_name;
+            }
+        }
+
+        /* Stage 3: N-gram correction (Level >= 3) if typo didn't match */
+        if (strcmp(corrected_name, check_name) == 0 &&
+            level >= POSTPROCESS_LEVEL_NGRAM) {
+            const char *new_name =
+                ngram_correction(corrected_name, dictionary, dict_size, 2, 0.3);
+            if (strcmp(new_name, corrected_name) != 0) {
+                corrected_name = new_name;
+            }
+        }
+
+        /* Stage 4: Semantic correction (Level >= 4) if ngram didn't match */
+        if (strcmp(corrected_name, check_name) == 0 &&
+            level >= POSTPROCESS_LEVEL_SEMANTIC) {
+            const char *new_name = semantic_correction(corrected_name, dictionary,
+                                                       dict_size, dim, threshold);
+            if (strcmp(new_name, corrected_name) != 0) {
+                corrected_name = new_name;
+            }
+        }
+
+        if (strcmp(corrected_name, check_name) != 0) {
+            char final_buf[128];
+            if (tok->is_all_upper) {
+                to_upper_str(corrected_name, final_buf, sizeof(final_buf));
+            } else {
+                strncpy(final_buf, corrected_name, sizeof(final_buf) - 1);
+                final_buf[sizeof(final_buf) - 1] = '\0';
+            }
+            free(tok->text);
+            size_t flen = strlen(final_buf);
+            tok->text = (char *)malloc(flen + 1);
+            memcpy(tok->text, final_buf, flen + 1);
+        }
+    }
+}

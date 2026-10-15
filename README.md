@@ -149,13 +149,20 @@ scripts/fetch-assets stage1-contract2-rc1 embedding
 # [JSON 파일 일괄 입출력] input.json(question 목록) -> output.json(question, sql 목록) 일괄 처리
 ./build/sql-cli assets/stage1-contract2-rc1/model.gguf \
   --json input.json output.json \
+  --strategy typo,ngram \
+  --db assets/stage1-contract2-rc1/shop.db \
+  --max-tokens 64
+
+# [단독 후처리] 모델 없이 SQL 오타 직접 교정 (5단계 계단식 전략: none -> keyword -> typo -> ngram -> semantic)
+./build/sql-cli --postprocess "SELETC ctiy FRMO costumers" \
+  --strategy typo \
   --db assets/stage1-contract2-rc1/shop.db
 
-# [단독 후처리] 모델 없이 SQL 오타 직접 교정
-./build/sql-cli --postprocess "SELETC ctiy FRMO costumers" --db assets/stage1-contract2-rc1/shop.db
-
-# 순수 모델 추론: 질문 -> 날것의 SQL 생성 (stderr에 종료 이유 출력)
-./build/sql-cli assets/stage1-contract2-rc1/model.gguf --generate "what city does ashley live in?" 64
+# 순수 모델 추론: 질문 -> 날것의 SQL 생성 (Stage 0: none 적용과 동일)
+./build/sql-cli assets/stage1-contract2-rc1/model.gguf \
+  --query "what city does ashley live in?" \
+  --strategy none \
+  --max-tokens 64
 
 # 텍스트 BPE 토큰화 (토큰 ID 출력)
 ./build/sql-cli assets/stage1-contract2-rc1/model.gguf --encode "SELECT stock FROM items;"
