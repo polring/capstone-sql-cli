@@ -33,7 +33,7 @@
 | **`--postprocess`**       | **[단독]** 모델 없이 입력된 SQL의 예약어 및 스키마 오타 직접 교정                                              | `SQL`          |
 | **`--encode`**            | BPE 토큰화: 입력 텍스트를 정수 토큰 ID 배열로 변환                                                        | `TEXT`         |
 | **`--logits`**            | 로짓 계산: 주어진 토큰 시퀀스에 대해 Vocab 확률 벡터 계산                                                    | `TOKEN_ID...`  |
-| **`--json`**              | **[JSON I/O]** JSON 형식 질의 입력(인자 또는 표준 입력) 및 구조화된 JSON 결과 출력 (GUI/IPC 연동용)       | `[JSON_STR]`   |
+| **`--json`**              | **[JSON 파일 입출력]** 입력 JSON(`question` 추출)을 읽고 질의별 SQL 결과(`question`, `output`)를 출력 JSON 파일로 작성 | `IN.json OUT.json` |
 | **`-i`, `--interactive`** | **[대화형]** 모델/DB를 메모리에 상주시킨 상태로 연속 질의 가능한 REPL 쉘 시작                                      | `[MODEL.gguf]` |
 
 ### 2) 명시적 옵션 플래그 (Options)
@@ -226,38 +226,47 @@ SELECT city FROM customers WHERE name = 'ashley'
 SELECT city FROM customers
 ```
 
-### 4) CLI JSON 입출력 모드 (`--json`)
+### 4) CLI JSON 파일 입출력 모드 (`--json`)
 
-GUI 애플리케이션 또는 프로세스 간 통신(IPC) 파이프라인에서 입력과 결과를 구조화된 JSON으로 주고받을 때 사용합니다.
+입력 JSON 파일(`input.json`)에서 `question` 필드를 추출하여 SQL을 생성/후처리한 뒤, 각 질문과 생성된 SQL(`output`)만 담은 결과 JSON 파일(`output.json`)로 저장합니다. 하나의 파일에 여러 개의 질의가 포함되어 있어도 일괄 처리합니다.
 
-- **명령줄 인자로 JSON 전달**:
+- **명령줄 실행 (위치 인자)**:
   ```bash
   ./build/sql-cli assets/stage1-contract2-rc1/model.gguf \
-    --json "{\"question\": \"what city does ashley live in?\"}" \
+    --json input.json output.json \
     --db assets/stage1-contract2-rc1/shop.db
   ```
-- **표준 입력(stdin) 파이프로 JSON 전달**:
+- **또는 출력 파일 경로 옵션(`-o` / `--output`) 사용**:
   ```bash
-  echo '{"question": "what city does ashley live in?"}' | \
-    ./build/sql-cli assets/stage1-contract2-rc1/model.gguf --json \
+  ./build/sql-cli assets/stage1-contract2-rc1/model.gguf \
+    --json input.json -o output.json \
     --db assets/stage1-contract2-rc1/shop.db
   ```
-- **성공 시 출력 형식 (`stdout`)**:
+- **입력 JSON 파일 예시 (`input.json`)**:
   ```json
-  {
-    "status": "success",
-    "question": "what city does ashley live in?",
-    "raw_sql": "SELECT city FROM customers WHERE name = 'ashley'",
-    "final_sql": "SELECT city FROM customers WHERE name = 'ashley'",
-    "stop_reason": "eos"
-  }
+  [
+    {
+      "id": 1,
+      "question": "what city does ashley live in?"
+    },
+    {
+      "id": 2,
+      "question": "how many customers are there?"
+    }
+  ]
   ```
-- **오류 시 출력 형식 (`stdout` 또는 `stderr`)**:
+- **출력 JSON 파일 결과 (`output.json`)**:
   ```json
-  {
-    "status": "error",
-    "error": "Failed to load model from invalid.gguf"
-  }
+  [
+    {
+      "question": "what city does ashley live in?",
+      "output": "SELECT city FROM customers WHERE name = 'ashley'"
+    },
+    {
+      "question": "how many customers are there?",
+      "output": "SELECT count(*) FROM customers"
+    }
+  ]
   ```
 
 ---

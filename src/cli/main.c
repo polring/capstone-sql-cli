@@ -60,6 +60,8 @@ typedef struct {
     CliMode mode;
     const char *model_path;
     const char *text;
+    const char *input_json_path;
+    const char *output_json_path;
     const char *db_path;
     const char *strategy;
     int dim;
@@ -114,58 +116,173 @@ static void validate_strategy_and_dim(const char *strategy, int dim,
     }
 }
 
-static char *extract_json_string_field(const char *json, const char *key) {
-    if (!json || !key) {
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+
+static FILE *open_file_utf8(const char *path, const char *mode) {
+    if (!path || !mode) {
         return NULL;
     }
-    char target[128];
-    snprintf(target, sizeof(target), "\"%s\"", key);
-    size_t target_len = strlen(target);
+    int wlen_path = MultiByteToWideChar(CP_UTF8, 0, path, -1, NULL, 0);
+    int wlen_mode = MultiByteToWideChar(CP_UTF8, 0, mode, -1, NULL, 0);
+    if (wlen_path > 0 && wlen_mode > 0) {
+        wchar_t *wpath = (wchar_t *)malloc(wlen_path * sizeof(wchar_t));
+        wchar_t *wmode = (wchar_t *)malloc(wlen_mode * sizeof(wchar_t));
+        if (wpath && wmode) {
+            MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath, wlen_path);
+            MultiByteToWideChar(CP_UTF8, 0, mode, -1, wmode, wlen_mode);
+            FILE *f = _wfopen(wpath, wmode);
+            free(wpath);
+            free(wmode);
+            return f;
+        }
+        free(wpath);
+        free(wmode);
+    }
+    return fopen(path, mode);
+}
+#else
+static FILE *open_file_utf8(const char *path, const char *mode) {
+    return fopen(path, mode);
+}
+#endif
+
+static char *read_file_to_string(const char *path) {
+    if (!path) {
+        return NULL;
+    }
+    FILE *f = open_file_utf8(path, "rb");
+    if (!f) {
+        return NULL;
+    }
+    if (fseek(f, 0, SEEK_END) != 0) {
+        fclose(f);
+        return NULL;
+    }
+    long size = ftell(f);
+    if (size < 0) {
+        fclose(f);
+        return NULL;
+    }
+    if (fseek(f, 0, SEEK_SET) != 0) {
+        fclose(f);
+        return NULL;
+    }
+    char *buf = (char *)malloc((size_t)size + 1);
+    if (!buf) {
+        fclose(f);
+        return NULL;
+    }
+    size_t read_bytes = fread(buf, 1, (size_t)size, f);
+    buf[read_bytes] = '\0';
+    fclose(f);
+    return buf;
+}
+
+static char **extract_all_json_questions(const char *json, size_t *out_count,
+                                         int *out_is_array) {
+    *out_count = 0;
+    if (out_is_array) {
+        *out_is_array = 0;
+    }
+    if (!json) {
+        return NULL;
+    }
+
+    const char *first_non_ws = json;
+    while (*first_non_ws == ' ' || *first_non_ws == '\t' || *first_non_ws == '\r' ||
+           *first_non_ws == '\n') {
+        first_non_ws++;
+    }
+    if (*first_non_ws == '[') {
+        if (out_is_array) {
+            *out_is_array = 1;
+        }
+    }
+
+    size_t capacity = 16;
+    char **questions = (char **)malloc(capacity * sizeof(char *));
+    if (!questions) {
+        return NULL;
+    }
+    size_t count = 0;
 
     const char *p = json;
     while (*p) {
-        p = strstr(p, target);
-        if (!p) {
+        const char *match = strstr(p, "question");
+        if (!match) {
             break;
         }
-        p += target_len;
-        while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') {
-            p++;
-        }
-        if (*p != ':') {
-            continue;
-        }
-        p++;
-        while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') {
-            p++;
-        }
-        if (*p != '\"') {
-            continue;
-        }
-        p++;
 
-        const char *val_start = p;
-        int escaped = 0;
-        while (*p) {
-            if (*p == '\\' && !escaped) {
-                escaped = 1;
-                p++;
+        if (match > json) {
+            char prev = match[-1];
+            if (isalnum((unsigned char)prev) || prev == '_') {
+                p = match + 8;
                 continue;
             }
-            if (*p == '\"' && !escaped) {
+        }
+
+        const char *after_key = match + 8;
+        int quoted_key = (match > json && (match[-1] == '\"' || match[-1] == '\''));
+        if (quoted_key) {
+            if (*after_key != '\"' && *after_key != '\'') {
+                p = after_key;
+                continue;
+            }
+            after_key++;
+        } else {
+            if (isalnum((unsigned char)*after_key) || *after_key == '_') {
+                p = after_key;
+                continue;
+            }
+        }
+
+        while (*after_key == ' ' || *after_key == '\t' || *after_key == '\r' ||
+               *after_key == '\n') {
+            after_key++;
+        }
+        if (*after_key != ':') {
+            p = after_key;
+            continue;
+        }
+        after_key++;
+
+        while (*after_key == ' ' || *after_key == '\t' || *after_key == '\r' ||
+               *after_key == '\n') {
+            after_key++;
+        }
+        if (*after_key != '\"') {
+            p = after_key;
+            continue;
+        }
+        after_key++;
+
+        const char *val_start = after_key;
+        int escaped = 0;
+        while (*after_key) {
+            if (*after_key == '\\' && !escaped) {
+                escaped = 1;
+                after_key++;
+                continue;
+            }
+            if (*after_key == '\"' && !escaped) {
                 break;
             }
             escaped = 0;
-            p++;
+            after_key++;
         }
-        if (*p != '\"') {
-            return NULL;
+        if (*after_key != '\"') {
+            p = after_key;
+            break;
         }
 
-        size_t val_len = (size_t)(p - val_start);
-        char *result = (char *)malloc(val_len + 1);
-        if (!result) {
-            return NULL;
+        size_t val_len = (size_t)(after_key - val_start);
+        char *extracted = (char *)malloc(val_len + 1);
+        if (!extracted) {
+            break;
         }
 
         size_t out_idx = 0;
@@ -174,138 +291,55 @@ static char *extract_json_string_field(const char *json, const char *key) {
                 i++;
                 switch (val_start[i]) {
                 case '\"':
-                    result[out_idx++] = '\"';
+                    extracted[out_idx++] = '\"';
                     break;
                 case '\\':
-                    result[out_idx++] = '\\';
+                    extracted[out_idx++] = '\\';
                     break;
                 case '/':
-                    result[out_idx++] = '/';
+                    extracted[out_idx++] = '/';
                     break;
                 case 'b':
-                    result[out_idx++] = '\b';
+                    extracted[out_idx++] = '\b';
                     break;
                 case 'f':
-                    result[out_idx++] = '\f';
+                    extracted[out_idx++] = '\f';
                     break;
                 case 'n':
-                    result[out_idx++] = '\n';
+                    extracted[out_idx++] = '\n';
                     break;
                 case 'r':
-                    result[out_idx++] = '\r';
+                    extracted[out_idx++] = '\r';
                     break;
                 case 't':
-                    result[out_idx++] = '\t';
+                    extracted[out_idx++] = '\t';
                     break;
                 default:
-                    result[out_idx++] = val_start[i];
+                    extracted[out_idx++] = val_start[i];
                     break;
                 }
             } else {
-                result[out_idx++] = val_start[i];
+                extracted[out_idx++] = val_start[i];
             }
         }
-        result[out_idx] = '\0';
-        return result;
-    }
+        extracted[out_idx] = '\0';
 
-    /* Fallback for unquoted key: key: "value" (common in CLI shell stripping) */
-    p = json;
-    size_t key_len = strlen(key);
-    while (*p) {
-        p = strstr(p, key);
-        if (!p) {
-            break;
-        }
-        if (p > json &&
-            (isalnum((unsigned char)p[-1]) || p[-1] == '_' || p[-1] == '\"')) {
-            p += key_len;
-            continue;
-        }
-        const char *after = p + key_len;
-        while (*after == ' ' || *after == '\t' || *after == '\r' || *after == '\n') {
-            after++;
-        }
-        if (*after != ':') {
-            p += key_len;
-            continue;
-        }
-        after++;
-        while (*after == ' ' || *after == '\t' || *after == '\r' || *after == '\n') {
-            after++;
-        }
-        if (*after != '\"') {
-            p += key_len;
-            continue;
-        }
-        after++;
-
-        const char *val_start = after;
-        int escaped = 0;
-        while (*after) {
-            if (*after == '\\' && !escaped) {
-                escaped = 1;
-                after++;
-                continue;
-            }
-            if (*after == '\"' && !escaped) {
+        if (count >= capacity) {
+            capacity *= 2;
+            char **new_q = (char **)realloc(questions, capacity * sizeof(char *));
+            if (!new_q) {
+                free(extracted);
                 break;
             }
-            escaped = 0;
-            after++;
+            questions = new_q;
         }
-        if (*after != '\"') {
-            return NULL;
-        }
+        questions[count++] = extracted;
 
-        size_t val_len = (size_t)(after - val_start);
-        char *result = (char *)malloc(val_len + 1);
-        if (!result) {
-            return NULL;
-        }
-
-        size_t out_idx = 0;
-        for (size_t i = 0; i < val_len; i++) {
-            if (val_start[i] == '\\' && i + 1 < val_len) {
-                i++;
-                switch (val_start[i]) {
-                case '\"':
-                    result[out_idx++] = '\"';
-                    break;
-                case '\\':
-                    result[out_idx++] = '\\';
-                    break;
-                case '/':
-                    result[out_idx++] = '/';
-                    break;
-                case 'b':
-                    result[out_idx++] = '\b';
-                    break;
-                case 'f':
-                    result[out_idx++] = '\f';
-                    break;
-                case 'n':
-                    result[out_idx++] = '\n';
-                    break;
-                case 'r':
-                    result[out_idx++] = '\r';
-                    break;
-                case 't':
-                    result[out_idx++] = '\t';
-                    break;
-                default:
-                    result[out_idx++] = val_start[i];
-                    break;
-                }
-            } else {
-                result[out_idx++] = val_start[i];
-            }
-        }
-        result[out_idx] = '\0';
-        return result;
+        p = after_key + 1;
     }
 
-    return NULL;
+    *out_count = count;
+    return questions;
 }
 
 static void print_json_escaped_string(FILE *out, const char *str) {
@@ -314,63 +348,58 @@ static void print_json_escaped_string(FILE *out, const char *str) {
         return;
     }
     fputc('\"', out);
-    for (const char *p = str; *p; p++) {
-        switch (*p) {
-        case '\"':
+    const unsigned char *p = (const unsigned char *)str;
+    while (*p) {
+        if (*p == '\"') {
             fputs("\\\"", out);
-            break;
-        case '\\':
+            p++;
+        } else if (*p == '\\') {
             fputs("\\\\", out);
-            break;
-        case '\b':
+            p++;
+        } else if (*p == '\b') {
             fputs("\\b", out);
-            break;
-        case '\f':
+            p++;
+        } else if (*p == '\f') {
             fputs("\\f", out);
-            break;
-        case '\n':
+            p++;
+        } else if (*p == '\n') {
             fputs("\\n", out);
-            break;
-        case '\r':
+            p++;
+        } else if (*p == '\r') {
             fputs("\\r", out);
-            break;
-        case '\t':
+            p++;
+        } else if (*p == '\t') {
             fputs("\\t", out);
-            break;
-        default:
-            if ((unsigned char)*p < 0x20) {
-                fprintf(out, "\\u%04x", (unsigned char)*p);
-            } else {
-                fputc(*p, out);
-            }
-            break;
+            p++;
+        } else if (*p < 0x20 || *p == 0x7F) {
+            fprintf(out, "\\u%04x", *p);
+            p++;
+        } else if (*p < 0x80) {
+            fputc(*p, out);
+            p++;
+        } else if ((*p & 0xE0) == 0xC0 && (p[1] & 0xC0) == 0x80) {
+            fputc(p[0], out);
+            fputc(p[1], out);
+            p += 2;
+        } else if ((*p & 0xF0) == 0xE0 && (p[1] & 0xC0) == 0x80 &&
+                   (p[2] & 0xC0) == 0x80) {
+            fputc(p[0], out);
+            fputc(p[1], out);
+            fputc(p[2], out);
+            p += 3;
+        } else if ((*p & 0xF8) == 0xF0 && (p[1] & 0xC0) == 0x80 &&
+                   (p[2] & 0xC0) == 0x80 && (p[3] & 0xC0) == 0x80) {
+            fputc(p[0], out);
+            fputc(p[1], out);
+            fputc(p[2], out);
+            fputc(p[3], out);
+            p += 4;
+        } else {
+            fprintf(out, "\\u00%02x", *p);
+            p++;
         }
     }
     fputc('\"', out);
-}
-
-static char *read_all_stdin(void) {
-    size_t cap = 4096;
-    size_t size = 0;
-    char *buf = (char *)malloc(cap);
-    if (!buf) {
-        return NULL;
-    }
-    size_t n = 0;
-    while ((n = fread(buf + size, 1, cap - size - 1, stdin)) > 0) {
-        size += n;
-        if (size + 1024 >= cap) {
-            cap *= 2;
-            char *new_buf = (char *)realloc(buf, cap);
-            if (!new_buf) {
-                free(buf);
-                return NULL;
-            }
-            buf = new_buf;
-        }
-    }
-    buf[size] = '\0';
-    return buf;
 }
 
 static void print_usage(const char *program_name) {
@@ -384,9 +413,10 @@ static void print_usage(const char *program_name) {
         "  --query QUESTION [--db PATH] [--strategy STRATS] [--dim DIM] "
         "[--max-tokens N]\n"
         "      (alias: --pipeline) Generate and correct SQL using schema\n"
-        "  --json [JSON_STR] [--db PATH] [--strategy STRATS] [--dim DIM] [--max-tokens "
-        "N]\n"
-        "      Parse input JSON (extracting 'question' field) and output JSON result\n"
+        "  --json INPUT.json OUTPUT.json [--db PATH] [--strategy STRATS] [--dim DIM] "
+        "[--max-tokens N]\n"
+        "      Read questions from INPUT.json and write questions with SQL outputs to "
+        "OUTPUT.json\n"
         "  --generate QUESTION [max_new_tokens]\n"
         "      Generate raw SQL from question without post-processing\n"
         "  --postprocess SQL [--db PATH] [--strategy STRATS] [--dim DIM]\n"
@@ -445,34 +475,25 @@ static CliOptions parse_cli_options(int argc, char **argv) {
     if (!strcmp(argv[2], "--json")) {
         options.mode = CLI_MODE_JSON;
         int idx = 3;
-        char *json_raw = NULL;
-        int need_free_json = 0;
+        if (idx >= argc) {
+            fail("expected input and output json file paths: --json <input.json> "
+                 "<output.json>");
+        }
+        options.input_json_path = argv[idx++];
+
+        /* Check if next argument is output file path (positional) */
         if (idx < argc && argv[idx][0] != '-') {
-            json_raw = argv[idx++];
-        } else {
-            json_raw = read_all_stdin();
-            need_free_json = 1;
+            options.output_json_path = argv[idx++];
         }
-
-        if (!json_raw || !*json_raw) {
-            fail("expected JSON input containing 'question' field");
-        }
-
-        char *question = extract_json_string_field(json_raw, "question");
-        if (!question) {
-            if (need_free_json) {
-                free(json_raw);
-            }
-            fail("missing or invalid 'question' field in input JSON");
-        }
-        if (need_free_json) {
-            free(json_raw);
-        }
-        options.text = question;
-        options.allocated_text = question;
 
         while (idx < argc) {
-            if (!strcmp(argv[idx], "--db") || !strcmp(argv[idx], "-b")) {
+            if (!strcmp(argv[idx], "-o") || !strcmp(argv[idx], "--out") ||
+                !strcmp(argv[idx], "--output")) {
+                if (++idx >= argc) {
+                    fail("expected output file path after -o/--output");
+                }
+                options.output_json_path = argv[idx++];
+            } else if (!strcmp(argv[idx], "--db") || !strcmp(argv[idx], "-b")) {
                 if (++idx >= argc) {
                     fail("unknown mode or invalid arguments");
                 }
@@ -502,6 +523,10 @@ static CliOptions parse_cli_options(int argc, char **argv) {
             } else {
                 fail("unknown mode or invalid arguments");
             }
+        }
+
+        if (!options.output_json_path) {
+            fail("expected output json file path: --json <input.json> <output.json>");
         }
 
         validate_strategy_and_dim(options.strategy, options.dim, options.dim_specified);
@@ -778,27 +803,37 @@ static void run_query_command(const Model *model, const CliOptions *options) {
 }
 
 static void run_json_command(const Model *model, const CliOptions *options) {
-    int *token_ids = allocate_array(model->config.context_length, sizeof(int));
-    int prompt_count = prepare_prompt_tokens(model, options->text, token_ids);
-    int token_count = prompt_count;
-    const char *stop_reason =
-        generate_tokens(model, token_ids, &token_count, options->max_new_tokens);
+    if (!options->input_json_path || !options->output_json_path) {
+        fail("both input and output json file paths are required: --json <input.json> "
+             "<output.json>");
+    }
 
-    size_t raw_sql_len = 0;
-    for (int index = prompt_count; index < token_count; index++) {
-        int token_id = token_ids[index];
-        raw_sql_len += model->tokenizer.token_byte_lengths[token_id];
+    char *json_text = read_file_to_string(options->input_json_path);
+    if (!json_text) {
+        fail("failed to open or read input JSON file");
     }
-    char *raw_sql = allocate_array(raw_sql_len + 1, 1);
-    size_t offset = 0;
-    for (int index = prompt_count; index < token_count; index++) {
-        int token_id = token_ids[index];
-        size_t len = model->tokenizer.token_byte_lengths[token_id];
-        memcpy(raw_sql + offset, model->tokenizer.token_bytes[token_id], len);
-        offset += len;
+
+    int is_array = 0;
+    size_t question_count = 0;
+    char **questions =
+        extract_all_json_questions(json_text, &question_count, &is_array);
+    free(json_text);
+
+    if (question_count == 0) {
+        if (questions) {
+            free(questions);
+        }
+        fail("no 'question' field found in input JSON file");
     }
-    raw_sql[raw_sql_len] = '\0';
-    free(token_ids);
+
+    FILE *out = open_file_utf8(options->output_json_path, "wb");
+    if (!out) {
+        for (size_t i = 0; i < question_count; i++) {
+            free(questions[i]);
+        }
+        free(questions);
+        fail("failed to open output JSON file for writing");
+    }
 
     char **dictionary = NULL;
     size_t dict_size = 0;
@@ -812,27 +847,86 @@ static void run_json_command(const Model *model, const CliOptions *options) {
     try_configure_semantic_path(
         options->db_path ? options->db_path : options->model_path, options->dim);
     const char *strategy = options->strategy ? options->strategy : "typo,ngram";
-    char *fixed_sql = process_sql(raw_sql, strategy, (const char **)dictionary,
-                                  dict_size, options->dim, options->threshold);
 
-    printf("{\n");
-    printf("  \"question\": ");
-    print_json_escaped_string(stdout, options->text);
-    printf(",\n  \"sql\": ");
-    print_json_escaped_string(stdout, fixed_sql ? fixed_sql : raw_sql);
-    printf(",\n  \"raw_sql\": ");
-    print_json_escaped_string(stdout, raw_sql);
-    printf(",\n  \"stop_reason\": \"%s\",\n", stop_reason);
-    printf("  \"success\": true\n");
-    printf("}\n");
-
-    if (fixed_sql) {
-        free(fixed_sql);
+    int use_array = (is_array || question_count > 1);
+    if (use_array) {
+        fputs("[\n", out);
     }
+
+    for (size_t q_idx = 0; q_idx < question_count; q_idx++) {
+        const char *question = questions[q_idx];
+
+        int *token_ids = allocate_array(model->config.context_length, sizeof(int));
+        int prompt_count = prepare_prompt_tokens(model, question, token_ids);
+        int token_count = prompt_count;
+        const char *stop_reason =
+            generate_tokens(model, token_ids, &token_count, options->max_new_tokens);
+        (void)stop_reason;
+
+        size_t raw_sql_len = 0;
+        for (int index = prompt_count; index < token_count; index++) {
+            int token_id = token_ids[index];
+            raw_sql_len += model->tokenizer.token_byte_lengths[token_id];
+        }
+        char *raw_sql = allocate_array(raw_sql_len + 1, 1);
+        size_t offset = 0;
+        for (int index = prompt_count; index < token_count; index++) {
+            int token_id = token_ids[index];
+            size_t len = model->tokenizer.token_byte_lengths[token_id];
+            memcpy(raw_sql + offset, model->tokenizer.token_bytes[token_id], len);
+            offset += len;
+        }
+        raw_sql[raw_sql_len] = '\0';
+        free(token_ids);
+
+        char *fixed_sql = NULL;
+        if (dictionary && dict_size > 0) {
+            fixed_sql = process_sql(raw_sql, strategy, (const char **)dictionary,
+                                    dict_size, options->dim, options->threshold);
+        }
+        const char *final_sql =
+            (fixed_sql && strncmp(fixed_sql, "Error:", 6) != 0) ? fixed_sql : raw_sql;
+
+        const char *indent = use_array ? "  " : "";
+        if (use_array) {
+            fputs("  {\n", out);
+        } else {
+            fputs("{\n", out);
+        }
+        fprintf(out, "%s  \"question\": ", indent);
+        print_json_escaped_string(out, question);
+        fprintf(out, ",\n%s  \"output\": ", indent);
+        print_json_escaped_string(out, final_sql);
+        fprintf(out, "\n%s}", indent);
+
+        if (use_array) {
+            if (q_idx + 1 < question_count) {
+                fputs(",\n", out);
+            } else {
+                fputs("\n", out);
+            }
+        } else {
+            fputs("\n", out);
+        }
+
+        if (fixed_sql) {
+            free(fixed_sql);
+        }
+        free(raw_sql);
+        free(questions[q_idx]);
+    }
+
+    if (use_array) {
+        fputs("]\n", out);
+    }
+
+    fclose(out);
+    free(questions);
+
     if (dictionary) {
         free_dictionary(dictionary, dict_size);
     }
-    free(raw_sql);
+    free_semantic_cache();
 }
 
 /* ====================================================================== */
