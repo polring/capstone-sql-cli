@@ -33,7 +33,7 @@
 | **`--postprocess`**       | **[단독]** 모델 없이 입력된 SQL의 예약어 및 스키마 오타 직접 교정                                              | `SQL`          |
 | **`--encode`**            | BPE 토큰화: 입력 텍스트를 정수 토큰 ID 배열로 변환                                                        | `TEXT`         |
 | **`--logits`**            | 로짓 계산: 주어진 토큰 시퀀스에 대해 Vocab 확률 벡터 계산                                                    | `TOKEN_ID...`  |
-| **`--json`**              | **[JSON 파일 입출력]** 입력 JSON(`question` 추출)을 읽고 질의별 SQL 결과(`question`, `output`)를 출력 JSON 파일로 작성 | `IN.json OUT.json` |
+| **`--json`**              | **[JSON 파일 입출력]** 입력 JSON(`question` 추출)을 읽고 질의별 SQL 결과(`question`, `sql`)를 출력 JSON 파일로 작성 | `IN.json OUT.json` |
 | **`-i`, `--interactive`** | **[대화형]** 모델/DB를 메모리에 상주시킨 상태로 연속 질의 가능한 REPL 쉘 시작                                      | `[MODEL.gguf]` |
 
 ### 2) 명시적 옵션 플래그 (Options)
@@ -228,7 +228,7 @@ SELECT city FROM customers
 
 ### 4) CLI JSON 파일 입출력 모드 (`--json`)
 
-입력 JSON 파일(`input.json`)에서 `question` 필드를 추출하여 SQL을 생성/후처리한 뒤, 각 질문과 생성된 SQL(`output`)만 담은 결과 JSON 파일(`output.json`)로 저장합니다. 하나의 파일에 여러 개의 질의가 포함되어 있어도 일괄 처리합니다.
+입력 JSON 파일(`input.json`)에서 `question` 필드를 추출하여 SQL을 생성/후처리한 뒤, 각 질문과 생성된 SQL(`sql`)만 담은 결과 JSON 파일(`output.json`)로 저장합니다. 하나의 파일에 여러 개의 질의가 포함되어 있어도 일괄 처리합니다.
 
 - **명령줄 실행 (위치 인자)**:
   ```bash
@@ -260,11 +260,11 @@ SELECT city FROM customers
   [
     {
       "question": "what city does ashley live in?",
-      "output": "SELECT city FROM customers WHERE name = 'ashley'"
+      "sql": "SELECT city FROM customers WHERE name = 'ashley'"
     },
     {
       "question": "how many customers are there?",
-      "output": "SELECT count(*) FROM customers"
+      "sql": "SELECT count(*) FROM customers"
     }
   ]
   ```

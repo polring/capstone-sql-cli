@@ -88,6 +88,20 @@ ctest --test-dir build -C Release --output-on-failure
 
 ---
 
+### 3) C 공유 라이브러리(`sql_engine.dll`) 및 C# 바인딩 빌드
+GUI 연동을 위한 C 네이티브 공유 라이브러리 및 .NET 8 P/Invoke 바인딩 프로젝트를 빌드합니다:
+
+```bash
+# 1. C 공유 라이브러리(sql_engine.dll / libsql_engine.so) 빌드
+cmake -B build -DSQL_BUILD_SHARED=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build build --target sql_engine --config Release
+
+# 2. C# P/Invoke 바인딩 레이어(SqlEngine.Core) 컴파일
+dotnet build src/bindings/SqlEngine.Core
+```
+
+---
+
 ## 4. 실행 방법
 
 ### 1) 모델, DB 및 임베딩 사전 가져오기 (Fetch)
@@ -131,6 +145,11 @@ scripts/fetch-assets stage1-contract2-rc1 embedding
   --db assets/stage1-contract2-rc1/shop.db \
   --strategy typo,ngram \
   --max-tokens 64
+
+# [JSON 파일 일괄 입출력] input.json(question 목록) -> output.json(question, sql 목록) 일괄 처리
+./build/sql-cli assets/stage1-contract2-rc1/model.gguf \
+  --json input.json output.json \
+  --db assets/stage1-contract2-rc1/shop.db
 
 # [단독 후처리] 모델 없이 SQL 오타 직접 교정
 ./build/sql-cli --postprocess "SELETC ctiy FRMO costumers" --db assets/stage1-contract2-rc1/shop.db

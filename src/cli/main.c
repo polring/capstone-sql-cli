@@ -895,7 +895,7 @@ static void run_json_command(const Model *model, const CliOptions *options) {
         }
         fprintf(out, "%s  \"question\": ", indent);
         print_json_escaped_string(out, question);
-        fprintf(out, ",\n%s  \"output\": ", indent);
+        fprintf(out, ",\n%s  \"sql\": ", indent);
         print_json_escaped_string(out, final_sql);
         fprintf(out, "\n%s}", indent);
 
