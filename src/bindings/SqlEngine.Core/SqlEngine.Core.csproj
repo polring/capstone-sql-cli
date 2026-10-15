@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RootNamespace>SqlEngine.Core</RootNamespace>
+    <AssemblyName>SqlEngine.Core</AssemblyName>
+  </PropertyGroup>
+
+</Project>

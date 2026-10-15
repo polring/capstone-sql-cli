@@ -18,15 +18,23 @@ struct SqlPipeline {
 };
 
 SqlPipeline *sql_pipeline_create(const char *model_path, const char *db_path) {
-    if (!model_path) {
+    if (!model_path || !*model_path) {
+        sql_set_last_error("model path is null or empty");
         return NULL;
     }
     SqlPipeline *pipeline = (SqlPipeline *)calloc(1, sizeof(SqlPipeline));
     if (!pipeline) {
+        sql_set_last_error("failed to allocate memory for SqlPipeline");
         return NULL;
     }
 
     pipeline->model = load_model(model_path);
+    if (!pipeline->model.tensors) {
+        /* load_model failed, sql_get_last_error is already populated */
+        free(pipeline);
+        return NULL;
+    }
+
     strncpy(pipeline->strategy, "typo,ngram", sizeof(pipeline->strategy) - 1);
     pipeline->dim = 0;
     pipeline->threshold = 0.0;
@@ -63,7 +71,8 @@ void sql_pipeline_set_embedding_path(SqlPipeline *pipeline, const char *path) {
 
 char *sql_pipeline_run(SqlPipeline *pipeline, const char *question, int max_new_tokens,
                        char **out_raw_sql, const char **out_stop_reason) {
-    if (!pipeline || !question) {
+    if (!pipeline || !pipeline->model.tensors || !question) {
+        sql_set_last_error("invalid pipeline or question parameter");
         return NULL;
     }
 

@@ -18,6 +18,9 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_DEBUG ${CMAKE_BINARY_DIR})
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY_RELEASE ${CMAKE_BINARY_DIR})
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY_DEBUG ${CMAKE_BINARY_DIR})
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY_RELEASE ${CMAKE_BINARY_DIR})
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY_DEBUG ${CMAKE_BINARY_DIR})
 
 # Math library on Unix / macOS
 if(UNIX)
@@ -60,7 +63,18 @@ if(MATH_LIB)
     target_link_libraries(postprocessor PUBLIC ${MATH_LIB})
 endif()
 
-# 2. Main Executable: sql-cli
+# 2. Core Shared Library (for C# GUI P/Invoke & external bindings)
+add_library(sql_engine SHARED
+    ${CORE_SOURCES}
+)
+target_include_directories(sql_engine PUBLIC ${CORE_INCLUDE_DIRS})
+target_compile_definitions(sql_engine PRIVATE SQL_BUILD_SHARED)
+target_link_libraries(sql_engine PRIVATE postprocessor)
+if(MATH_LIB)
+    target_link_libraries(sql_engine PRIVATE ${MATH_LIB})
+endif()
+
+# 3. Main Executable: sql-cli
 add_executable(sql-cli
     src/cli/main.c
     ${CORE_SOURCES}
@@ -71,7 +85,7 @@ if(MATH_LIB)
     target_link_libraries(sql-cli PRIVATE ${MATH_LIB})
 endif()
 
-# 3. Postprocessor Unit Test Executable
+# 4. Postprocessor Unit Test Executable
 add_executable(test_postprocessor
     tests/test_postprocessor.c
 )
@@ -81,7 +95,7 @@ if(MATH_LIB)
     target_link_libraries(test_postprocessor PRIVATE ${MATH_LIB})
 endif()
 
-# 4. Error Rejection Test Executable
+# 5. Error Rejection Test Executable
 add_executable(error_test
     tests/error_test.c
 )
@@ -90,7 +104,7 @@ if(MATH_LIB)
     target_link_libraries(error_test PRIVATE ${MATH_LIB})
 endif()
 
-# 5. Contract Fixture Test Executable
+# 6. Contract Fixture Test Executable
 add_executable(fixture_test
     tests/fixture_test.c
 )
@@ -102,11 +116,26 @@ if(MATH_LIB)
     target_link_libraries(fixture_test PRIVATE ${MATH_LIB})
 endif()
 
+# 7. Pipeline Unit & Integration Test Executable
+add_executable(test_pipeline
+    tests/test_pipeline.c
+)
+target_include_directories(test_pipeline PRIVATE ${CORE_INCLUDE_DIRS})
+target_link_libraries(test_pipeline PRIVATE sql_engine postprocessor)
+if(MATH_LIB)
+    target_link_libraries(test_pipeline PRIVATE ${MATH_LIB})
+endif()
+
 # Testing Integration (CTest)
 include(CTest)
 if(BUILD_TESTING)
     # Unit Test: Postprocessor
     add_test(NAME postprocessor_unit_test COMMAND test_postprocessor)
+
+    # Unit Test: Core Pipeline & Shared Library
+    add_test(NAME pipeline_unit_test
+        COMMAND test_pipeline ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/v2/base/model.gguf
+    )
 
     # Error Rejection Test
     add_test(NAME error_rejection_test

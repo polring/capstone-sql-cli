@@ -63,18 +63,22 @@ extern "C" {
 #endif
 
 SQL_API void fail(const char *message);
+SQL_API const char *sql_get_last_error(void);
+SQL_API void sql_set_last_error(const char *message);
 SQL_API void *allocate_array(size_t count, size_t element_size);
-SQL_API void append_token_id(int *token_ids, int *token_count, int capacity, int token_id);
+SQL_API void append_token_id(int *token_ids, int *token_count, int capacity,
+                             int token_id);
 
 SQL_API Model load_model(const char *file_path);
 SQL_API void release_model(Model *model);
 
 SQL_API float *forward(const Model *model, const int *token_ids, int token_count);
-SQL_API int encode_text(const Model *model, const char *text, int *token_ids, int capacity);
+SQL_API int encode_text(const Model *model, const char *text, int *token_ids,
+                        int capacity);
 SQL_API char *normalize_question(const char *text);
 SQL_API int prepare_prompt_tokens(const Model *model, const char *text, int *token_ids);
-SQL_API const char *generate_tokens(const Model *model, int *token_ids, int *token_count,
-                                    int max_new_tokens);
+SQL_API const char *generate_tokens(const Model *model, int *token_ids,
+                                    int *token_count, int max_new_tokens);
 SQL_API int select_next_token(const Model *model, const float *logits);
 
 #ifdef __cplusplus

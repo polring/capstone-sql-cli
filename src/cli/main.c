@@ -2,6 +2,7 @@
 #include "../core/postprocessor/core.h"
 #include "../core/postprocessor/schema.h"
 #include "../core/postprocessor/replacement.h"
+#include <ctype.h>
 #include <errno.h>
 #include <limits.h>
 #include <stdio.h>
@@ -51,7 +52,8 @@ typedef enum {
     CLI_MODE_POSTPROCESS, /* Postprocessing only without model */
     CLI_MODE_ENCODE,      /* BPE Tokenizer */
     CLI_MODE_LOGITS,      /* Logits output */
-    CLI_MODE_INTERACTIVE  /* Interactive REPL */
+    CLI_MODE_INTERACTIVE, /* Interactive REPL */
+    CLI_MODE_JSON         /* JSON I/O Mode */
 } CliMode;
 
 typedef struct {
@@ -66,6 +68,7 @@ typedef struct {
     int max_new_tokens;
     char **token_arguments;
     int token_argument_count;
+    char *allocated_text;
 } CliOptions;
 
 static char *trim_string(char *str) {
@@ -111,35 +114,298 @@ static void validate_strategy_and_dim(const char *strategy, int dim,
     }
 }
 
+static char *extract_json_string_field(const char *json, const char *key) {
+    if (!json || !key) {
+        return NULL;
+    }
+    char target[128];
+    snprintf(target, sizeof(target), "\"%s\"", key);
+    size_t target_len = strlen(target);
+
+    const char *p = json;
+    while (*p) {
+        p = strstr(p, target);
+        if (!p) {
+            break;
+        }
+        p += target_len;
+        while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') {
+            p++;
+        }
+        if (*p != ':') {
+            continue;
+        }
+        p++;
+        while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') {
+            p++;
+        }
+        if (*p != '\"') {
+            continue;
+        }
+        p++;
+
+        const char *val_start = p;
+        int escaped = 0;
+        while (*p) {
+            if (*p == '\\' && !escaped) {
+                escaped = 1;
+                p++;
+                continue;
+            }
+            if (*p == '\"' && !escaped) {
+                break;
+            }
+            escaped = 0;
+            p++;
+        }
+        if (*p != '\"') {
+            return NULL;
+        }
+
+        size_t val_len = (size_t)(p - val_start);
+        char *result = (char *)malloc(val_len + 1);
+        if (!result) {
+            return NULL;
+        }
+
+        size_t out_idx = 0;
+        for (size_t i = 0; i < val_len; i++) {
+            if (val_start[i] == '\\' && i + 1 < val_len) {
+                i++;
+                switch (val_start[i]) {
+                case '\"':
+                    result[out_idx++] = '\"';
+                    break;
+                case '\\':
+                    result[out_idx++] = '\\';
+                    break;
+                case '/':
+                    result[out_idx++] = '/';
+                    break;
+                case 'b':
+                    result[out_idx++] = '\b';
+                    break;
+                case 'f':
+                    result[out_idx++] = '\f';
+                    break;
+                case 'n':
+                    result[out_idx++] = '\n';
+                    break;
+                case 'r':
+                    result[out_idx++] = '\r';
+                    break;
+                case 't':
+                    result[out_idx++] = '\t';
+                    break;
+                default:
+                    result[out_idx++] = val_start[i];
+                    break;
+                }
+            } else {
+                result[out_idx++] = val_start[i];
+            }
+        }
+        result[out_idx] = '\0';
+        return result;
+    }
+
+    /* Fallback for unquoted key: key: "value" (common in CLI shell stripping) */
+    p = json;
+    size_t key_len = strlen(key);
+    while (*p) {
+        p = strstr(p, key);
+        if (!p) {
+            break;
+        }
+        if (p > json &&
+            (isalnum((unsigned char)p[-1]) || p[-1] == '_' || p[-1] == '\"')) {
+            p += key_len;
+            continue;
+        }
+        const char *after = p + key_len;
+        while (*after == ' ' || *after == '\t' || *after == '\r' || *after == '\n') {
+            after++;
+        }
+        if (*after != ':') {
+            p += key_len;
+            continue;
+        }
+        after++;
+        while (*after == ' ' || *after == '\t' || *after == '\r' || *after == '\n') {
+            after++;
+        }
+        if (*after != '\"') {
+            p += key_len;
+            continue;
+        }
+        after++;
+
+        const char *val_start = after;
+        int escaped = 0;
+        while (*after) {
+            if (*after == '\\' && !escaped) {
+                escaped = 1;
+                after++;
+                continue;
+            }
+            if (*after == '\"' && !escaped) {
+                break;
+            }
+            escaped = 0;
+            after++;
+        }
+        if (*after != '\"') {
+            return NULL;
+        }
+
+        size_t val_len = (size_t)(after - val_start);
+        char *result = (char *)malloc(val_len + 1);
+        if (!result) {
+            return NULL;
+        }
+
+        size_t out_idx = 0;
+        for (size_t i = 0; i < val_len; i++) {
+            if (val_start[i] == '\\' && i + 1 < val_len) {
+                i++;
+                switch (val_start[i]) {
+                case '\"':
+                    result[out_idx++] = '\"';
+                    break;
+                case '\\':
+                    result[out_idx++] = '\\';
+                    break;
+                case '/':
+                    result[out_idx++] = '/';
+                    break;
+                case 'b':
+                    result[out_idx++] = '\b';
+                    break;
+                case 'f':
+                    result[out_idx++] = '\f';
+                    break;
+                case 'n':
+                    result[out_idx++] = '\n';
+                    break;
+                case 'r':
+                    result[out_idx++] = '\r';
+                    break;
+                case 't':
+                    result[out_idx++] = '\t';
+                    break;
+                default:
+                    result[out_idx++] = val_start[i];
+                    break;
+                }
+            } else {
+                result[out_idx++] = val_start[i];
+            }
+        }
+        result[out_idx] = '\0';
+        return result;
+    }
+
+    return NULL;
+}
+
+static void print_json_escaped_string(FILE *out, const char *str) {
+    if (!str) {
+        fputs("\"\"", out);
+        return;
+    }
+    fputc('\"', out);
+    for (const char *p = str; *p; p++) {
+        switch (*p) {
+        case '\"':
+            fputs("\\\"", out);
+            break;
+        case '\\':
+            fputs("\\\\", out);
+            break;
+        case '\b':
+            fputs("\\b", out);
+            break;
+        case '\f':
+            fputs("\\f", out);
+            break;
+        case '\n':
+            fputs("\\n", out);
+            break;
+        case '\r':
+            fputs("\\r", out);
+            break;
+        case '\t':
+            fputs("\\t", out);
+            break;
+        default:
+            if ((unsigned char)*p < 0x20) {
+                fprintf(out, "\\u%04x", (unsigned char)*p);
+            } else {
+                fputc(*p, out);
+            }
+            break;
+        }
+    }
+    fputc('\"', out);
+}
+
+static char *read_all_stdin(void) {
+    size_t cap = 4096;
+    size_t size = 0;
+    char *buf = (char *)malloc(cap);
+    if (!buf) {
+        return NULL;
+    }
+    size_t n = 0;
+    while ((n = fread(buf + size, 1, cap - size - 1, stdin)) > 0) {
+        size += n;
+        if (size + 1024 >= cap) {
+            cap *= 2;
+            char *new_buf = (char *)realloc(buf, cap);
+            if (!new_buf) {
+                free(buf);
+                return NULL;
+            }
+            buf = new_buf;
+        }
+    }
+    buf[size] = '\0';
+    return buf;
+}
+
 static void print_usage(const char *program_name) {
-    fprintf(stderr,
-            "usage:\n"
-            "  %s MODEL.gguf [mode] [arguments...]\n"
-            "  %s --postprocess SQL [options...]\n"
-            "  %s [MODEL.gguf] -i\n\n"
-            "modes:\n"
-            "  --query QUESTION [--db PATH] [--strategy STRATS] [--dim DIM] "
-            "[--max-tokens N]\n"
-            "      (alias: --pipeline) Generate and correct SQL using schema\n"
-            "  --generate QUESTION [max_new_tokens]\n"
-            "      Generate raw SQL from question without post-processing\n"
-            "  --postprocess SQL [--db PATH] [--strategy STRATS] [--dim DIM]\n"
-            "      Directly correct SQL without running neural model\n"
-            "  --encode TEXT\n"
-            "      Encode text into BPE token IDs\n"
-            "  --logits ID...\n"
-            "      Compute logits for token sequence\n"
-            "  -i, --interactive\n"
-            "      Start interactive REPL session\n\n"
-            "options:\n"
-            "  -b, --db PATH           Path to SQLite database for schema dictionary\n"
-            "  -s, --strategy STRATS   Correction strategies (e.g. "
-            "typo,ngram,semantic. Default: typo,ngram)\n"
-            "  -d, --dim <50|100|200|300> GloVe vector dimension (required when using "
-            "'semantic')\n"
-            "  -t, --threshold FLOAT   Semantic similarity threshold (default: 0.0)\n"
-            "  --max-tokens N          Maximum new tokens to generate (default: 32)\n",
-            program_name, program_name, program_name);
+    fprintf(
+        stderr,
+        "usage:\n"
+        "  %s MODEL.gguf [mode] [arguments...]\n"
+        "  %s --postprocess SQL [options...]\n"
+        "  %s [MODEL.gguf] -i\n\n"
+        "modes:\n"
+        "  --query QUESTION [--db PATH] [--strategy STRATS] [--dim DIM] "
+        "[--max-tokens N]\n"
+        "      (alias: --pipeline) Generate and correct SQL using schema\n"
+        "  --json [JSON_STR] [--db PATH] [--strategy STRATS] [--dim DIM] [--max-tokens "
+        "N]\n"
+        "      Parse input JSON (extracting 'question' field) and output JSON result\n"
+        "  --generate QUESTION [max_new_tokens]\n"
+        "      Generate raw SQL from question without post-processing\n"
+        "  --postprocess SQL [--db PATH] [--strategy STRATS] [--dim DIM]\n"
+        "      Directly correct SQL without running neural model\n"
+        "  --encode TEXT\n"
+        "      Encode text into BPE token IDs\n"
+        "  --logits ID...\n"
+        "      Compute logits for token sequence\n"
+        "  -i, --interactive\n"
+        "      Start interactive REPL session\n\n"
+        "options:\n"
+        "  -b, --db PATH           Path to SQLite database for schema dictionary\n"
+        "  -s, --strategy STRATS   Correction strategies (e.g. "
+        "typo,ngram,semantic. Default: typo,ngram)\n"
+        "  -d, --dim <50|100|200|300> GloVe vector dimension (required when using "
+        "'semantic')\n"
+        "  -t, --threshold FLOAT   Semantic similarity threshold (default: 0.0)\n"
+        "  --max-tokens N          Maximum new tokens to generate (default: 32)\n",
+        program_name, program_name, program_name);
 }
 
 static int is_encode_request(int argc, char **argv) {
@@ -173,6 +439,72 @@ static CliOptions parse_cli_options(int argc, char **argv) {
     }
     if (!strcmp(argv[2], "-i") || !strcmp(argv[2], "--interactive")) {
         options.mode = CLI_MODE_INTERACTIVE;
+        return options;
+    }
+
+    if (!strcmp(argv[2], "--json")) {
+        options.mode = CLI_MODE_JSON;
+        int idx = 3;
+        char *json_raw = NULL;
+        int need_free_json = 0;
+        if (idx < argc && argv[idx][0] != '-') {
+            json_raw = argv[idx++];
+        } else {
+            json_raw = read_all_stdin();
+            need_free_json = 1;
+        }
+
+        if (!json_raw || !*json_raw) {
+            fail("expected JSON input containing 'question' field");
+        }
+
+        char *question = extract_json_string_field(json_raw, "question");
+        if (!question) {
+            if (need_free_json) {
+                free(json_raw);
+            }
+            fail("missing or invalid 'question' field in input JSON");
+        }
+        if (need_free_json) {
+            free(json_raw);
+        }
+        options.text = question;
+        options.allocated_text = question;
+
+        while (idx < argc) {
+            if (!strcmp(argv[idx], "--db") || !strcmp(argv[idx], "-b")) {
+                if (++idx >= argc) {
+                    fail("unknown mode or invalid arguments");
+                }
+                options.db_path = argv[idx++];
+            } else if (!strcmp(argv[idx], "--strategy") || !strcmp(argv[idx], "-s")) {
+                if (++idx >= argc) {
+                    fail("unknown mode or invalid arguments");
+                }
+                options.strategy = argv[idx++];
+            } else if (!strcmp(argv[idx], "--dim") || !strcmp(argv[idx], "-d")) {
+                if (++idx >= argc) {
+                    fail("unknown mode or invalid arguments");
+                }
+                options.dim = parse_nonnegative_integer(argv[idx++]);
+                options.dim_specified = 1;
+            } else if (!strcmp(argv[idx], "--threshold") || !strcmp(argv[idx], "-t")) {
+                if (++idx >= argc) {
+                    fail("unknown mode or invalid arguments");
+                }
+                options.threshold = atof(argv[idx++]);
+            } else if (!strcmp(argv[idx], "--max-tokens") ||
+                       !strcmp(argv[idx], "--max-new-tokens")) {
+                if (++idx >= argc) {
+                    fail("unknown mode or invalid arguments");
+                }
+                options.max_new_tokens = parse_nonnegative_integer(argv[idx++]);
+            } else {
+                fail("unknown mode or invalid arguments");
+            }
+        }
+
+        validate_strategy_and_dim(options.strategy, options.dim, options.dim_specified);
         return options;
     }
 
@@ -439,6 +771,64 @@ static void run_query_command(const Model *model, const CliOptions *options) {
     }
     fprintf(stderr, "stop=%s\n", stop_reason);
 
+    if (dictionary) {
+        free_dictionary(dictionary, dict_size);
+    }
+    free(raw_sql);
+}
+
+static void run_json_command(const Model *model, const CliOptions *options) {
+    int *token_ids = allocate_array(model->config.context_length, sizeof(int));
+    int prompt_count = prepare_prompt_tokens(model, options->text, token_ids);
+    int token_count = prompt_count;
+    const char *stop_reason =
+        generate_tokens(model, token_ids, &token_count, options->max_new_tokens);
+
+    size_t raw_sql_len = 0;
+    for (int index = prompt_count; index < token_count; index++) {
+        int token_id = token_ids[index];
+        raw_sql_len += model->tokenizer.token_byte_lengths[token_id];
+    }
+    char *raw_sql = allocate_array(raw_sql_len + 1, 1);
+    size_t offset = 0;
+    for (int index = prompt_count; index < token_count; index++) {
+        int token_id = token_ids[index];
+        size_t len = model->tokenizer.token_byte_lengths[token_id];
+        memcpy(raw_sql + offset, model->tokenizer.token_bytes[token_id], len);
+        offset += len;
+    }
+    raw_sql[raw_sql_len] = '\0';
+    free(token_ids);
+
+    char **dictionary = NULL;
+    size_t dict_size = 0;
+    if (options->db_path) {
+        if (load_dictionary_from_sqlite(options->db_path, &dictionary, &dict_size) !=
+            0) {
+            fprintf(stderr, "warning: cannot load schema from %s\n", options->db_path);
+        }
+    }
+
+    try_configure_semantic_path(
+        options->db_path ? options->db_path : options->model_path, options->dim);
+    const char *strategy = options->strategy ? options->strategy : "typo,ngram";
+    char *fixed_sql = process_sql(raw_sql, strategy, (const char **)dictionary,
+                                  dict_size, options->dim, options->threshold);
+
+    printf("{\n");
+    printf("  \"question\": ");
+    print_json_escaped_string(stdout, options->text);
+    printf(",\n  \"sql\": ");
+    print_json_escaped_string(stdout, fixed_sql ? fixed_sql : raw_sql);
+    printf(",\n  \"raw_sql\": ");
+    print_json_escaped_string(stdout, raw_sql);
+    printf(",\n  \"stop_reason\": \"%s\",\n", stop_reason);
+    printf("  \"success\": true\n");
+    printf("}\n");
+
+    if (fixed_sql) {
+        free(fixed_sql);
+    }
     if (dictionary) {
         free_dictionary(dictionary, dict_size);
     }
@@ -1350,6 +1740,9 @@ static void dispatch_cli_command(const Model *model, const CliOptions *options) 
     case CLI_MODE_QUERY:
         run_query_command(model, options);
         break;
+    case CLI_MODE_JSON:
+        run_json_command(model, options);
+        break;
     case CLI_MODE_POSTPROCESS:
     case CLI_MODE_INTERACTIVE:
         break;
@@ -1418,8 +1811,15 @@ int main(int argc, char **argv) {
 
     /* 7. Load model before checking mode to preserve error_test specification order */
     Model model = load_model(argv[1]);
+    if (!model.tensors) {
+        fprintf(stderr, "error: %s\n", sql_get_last_error());
+        return 1;
+    }
     CliOptions options = parse_cli_options(argc, argv);
     dispatch_cli_command(&model, &options);
+    if (options.allocated_text) {
+        free(options.allocated_text);
+    }
     release_model(&model);
     free_semantic_cache();
     return 0;

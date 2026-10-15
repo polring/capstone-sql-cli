@@ -33,6 +33,7 @@
 | **`--postprocess`**       | **[단독]** 모델 없이 입력된 SQL의 예약어 및 스키마 오타 직접 교정                                              | `SQL`          |
 | **`--encode`**            | BPE 토큰화: 입력 텍스트를 정수 토큰 ID 배열로 변환                                                        | `TEXT`         |
 | **`--logits`**            | 로짓 계산: 주어진 토큰 시퀀스에 대해 Vocab 확률 벡터 계산                                                    | `TOKEN_ID...`  |
+| **`--json`**              | **[JSON I/O]** JSON 형식 질의 입력(인자 또는 표준 입력) 및 구조화된 JSON 결과 출력 (GUI/IPC 연동용)       | `[JSON_STR]`   |
 | **`-i`, `--interactive`** | **[대화형]** 모델/DB를 메모리에 상주시킨 상태로 연속 질의 가능한 REPL 쉘 시작                                      | `[MODEL.gguf]` |
 
 ### 2) 명시적 옵션 플래그 (Options)
@@ -225,6 +226,40 @@ SELECT city FROM customers WHERE name = 'ashley'
 SELECT city FROM customers
 ```
 
+### 4) CLI JSON 입출력 모드 (`--json`)
+
+GUI 애플리케이션 또는 프로세스 간 통신(IPC) 파이프라인에서 입력과 결과를 구조화된 JSON으로 주고받을 때 사용합니다.
+
+- **명령줄 인자로 JSON 전달**:
+  ```bash
+  ./build/sql-cli assets/stage1-contract2-rc1/model.gguf \
+    --json "{\"question\": \"what city does ashley live in?\"}" \
+    --db assets/stage1-contract2-rc1/shop.db
+  ```
+- **표준 입력(stdin) 파이프로 JSON 전달**:
+  ```bash
+  echo '{"question": "what city does ashley live in?"}' | \
+    ./build/sql-cli assets/stage1-contract2-rc1/model.gguf --json \
+    --db assets/stage1-contract2-rc1/shop.db
+  ```
+- **성공 시 출력 형식 (`stdout`)**:
+  ```json
+  {
+    "status": "success",
+    "question": "what city does ashley live in?",
+    "raw_sql": "SELECT city FROM customers WHERE name = 'ashley'",
+    "final_sql": "SELECT city FROM customers WHERE name = 'ashley'",
+    "stop_reason": "eos"
+  }
+  ```
+- **오류 시 출력 형식 (`stdout` 또는 `stderr`)**:
+  ```json
+  {
+    "status": "error",
+    "error": "Failed to load model from invalid.gguf"
+  }
+  ```
+
 ---
 
 ## 5. 컴파일 방법 (CMake 통합 빌드)
@@ -251,6 +286,17 @@ cmake --build build --config Release
 # 2. CTest 테스트 실행 (전체 통과 시 약 1초 소요)
 ctest --test-dir build -C Release --output-on-failure
 ```
+
+### 3) C 공유 라이브러리(`sql_engine`) 및 C# 바인딩 빌드
+- **`sql_engine.dll` (또는 `libsql_engine.so`) 빌드**:
+  ```bash
+  cmake -B build -DSQL_BUILD_SHARED=ON -DCMAKE_BUILD_TYPE=Release
+  cmake --build build --target sql_engine --config Release
+  ```
+- **C# .NET 8 바인딩 (`src/bindings/SqlEngine.Core`) 빌드**:
+  ```bash
+  dotnet build src/bindings/SqlEngine.Core
+  ```
 
 ---
 
