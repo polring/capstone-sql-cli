@@ -983,7 +983,6 @@ static int process_json_file(const Model *model, const char *input_path,
     int is_array = 0;
     size_t count = 0;
     char **items = NULL;
-    int has_questions = 0;
 
     if (exec_mode == CLI_MODE_POSTPROCESS) {
         items = extract_all_json_strings_by_key(json_text, "sql", &count, &is_array);
@@ -993,11 +992,9 @@ static int process_json_file(const Model *model, const char *input_path,
             }
             items = extract_all_json_strings_by_key(json_text, "question", &count,
                                                     &is_array);
-            has_questions = (count > 0);
         }
     } else {
         items = extract_all_json_questions(json_text, &count, &is_array);
-        has_questions = 1;
     }
     free(json_text);
 
@@ -1119,13 +1116,15 @@ static int process_json_file(const Model *model, const char *input_path,
             fputs("{\n", out);
         }
 
-        if (has_questions) {
+        if (exec_mode == CLI_MODE_POSTPROCESS) {
+            fprintf(out, "%s  \"input\": ", indent);
+            print_json_escaped_string(out, item);
+            fprintf(out, ",\n%s  \"output\": ", indent);
+            print_json_escaped_string(out, final_sql ? final_sql : "");
+        } else {
             fprintf(out, "%s  \"question\": ", indent);
             print_json_escaped_string(out, item);
             fprintf(out, ",\n%s  \"sql\": ", indent);
-            print_json_escaped_string(out, final_sql ? final_sql : "");
-        } else {
-            fprintf(out, "%s  \"sql\": ", indent);
             print_json_escaped_string(out, final_sql ? final_sql : "");
         }
         fprintf(out, "\n%s}", indent);

@@ -290,32 +290,49 @@ SELECT city FROM customers
     --json input.json -o output.json \
     --db assets/stage1-contract2-rc1/shop.db
   ```
-- **입력 JSON 파일 예시 (`input.json`)**:
-  ```json
-  [
-    {
-      "id": 1,
-      "question": "what city does ashley live in?"
-    },
-    {
-      "id": 2,
-      "question": "how many customers are there?"
-    }
-  ]
-  ```
-- **출력 JSON 파일 결과 (`output.json`)**:
-  ```json
-  [
-    {
-      "question": "what city does ashley live in?",
-      "sql": "SELECT city FROM customers WHERE name = 'ashley'"
-    },
-    {
-      "question": "how many customers are there?",
-      "sql": "SELECT count(*) FROM customers"
-    }
-  ]
-  ```
+- **입력/출력 JSON 파일 형식 비교**:
+  * **Query 모드 (`--query` / 기본)**:
+    - 입력(`input.json`): `"question"` 키 탐색
+    - 출력(`output.json`): `"question"`, `"sql"` 키로 구성
+    ```json
+    // input.json
+    [
+      { "question": "what city does ashley live in?" },
+      { "question": "how many customers are there?" }
+    ]
+    // output.json
+    [
+      {
+        "question": "what city does ashley live in?",
+        "sql": "SELECT city FROM customers WHERE name = 'ashley'"
+      },
+      {
+        "question": "how many customers are there?",
+        "sql": "SELECT count(*) FROM customers"
+      }
+    ]
+    ```
+  * **Postprocess 모드 (`--postprocess`)**:
+    - 입력(`input_sql.json`): `"sql"` 키 탐색
+    - 출력(`output_sql.json`): `"input"`, `"output"` 키로 구성
+    ```json
+    // input_sql.json
+    [
+      { "sql": "SELETC * FRMO users" },
+      { "sql": "SELETC custmer_city FRMO customers" }
+    ]
+    // output_sql.json
+    [
+      {
+        "input": "SELETC * FRMO users",
+        "output": "SELECT * FROM customers"
+      },
+      {
+        "input": "SELETC custmer_city FRMO customers",
+        "output": "SELECT customer_id FROM customers"
+      }
+    ]
+    ```
 
 ---
 
