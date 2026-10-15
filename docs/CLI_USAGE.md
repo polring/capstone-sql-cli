@@ -84,6 +84,7 @@
   /set threshold <실수>  유사도 코사인 임계값 설정 (기본값: 0.5)
   /set tokens <숫자>     최대 생성 토큰 수 설정 (기본값: 32)
   /set mode <모드>       실행 모드 전환 (query, gen, post, enc)
+  /json <입력> <출력>    현재 쉘의 모드(query/gen), DB, 전략 설정을 반영하여 JSON 파일 일괄 처리
   /ls [경로|유형]        자산 폴더를 탐색하여 선택 가능한 모델(*.gguf), DB(*.db), 임베딩(*.bin) 목록 확인
                          (별칭: /list, /dir, /files. 예: /ls, /ls model, /ls db, /ls embedding, /ls assets/tag)
   /status                현재 로드된 모델, DB 경로, 교정 전략, 차원, 임계값 등 상태 확인
@@ -230,11 +231,31 @@ SELECT city FROM customers
 
 입력 JSON 파일(`input.json`)에서 `question` 필드를 추출하여 SQL을 생성/후처리한 뒤, 각 질문과 생성된 SQL(`sql`)만 담은 결과 JSON 파일(`output.json`)로 저장합니다. 하나의 파일에 여러 개의 질의가 포함되어 있어도 일괄 처리합니다.
 
-- **명령줄 실행 (위치 인자)**:
+- **명령줄 실행 (기본 query 모드: 생성 + 후처리)**:
   ```bash
   ./build/sql-cli assets/stage1-contract2-rc1/model.gguf \
     --json input.json output.json \
     --db assets/stage1-contract2-rc1/shop.db
+  ```
+- **순수 생성(generate) 모드로 일괄 변환 (후처리 건너뛰기)**:
+  ```bash
+  ./build/sql-cli assets/stage1-contract2-rc1/model.gguf \
+    --json input.json output.json \
+    --mode generate
+  # 또는 --generate 플래그 지정
+  # ./build/sql-cli assets/stage1-contract2-rc1/model.gguf --json input.json output.json --generate
+  ```
+- **대화형 쉘 내부에서 실행 (`/json`)**:
+  대화형 쉘에서는 현재 로드된 모델, DB, 전략뿐 아니라 활성화된 모드(`/set mode gen` 또는 `/set mode query`)를 그대로 반영하여 일괄 처리합니다:
+  ```text
+  sql-query> /set mode gen
+  Mode switched to: generate (raw model output)
+  sql-gen> /json input.json output.json
+  Processing JSON: 'input.json' -> 'output.json'
+    Mode:     generate (raw SQL)
+    Database: shop.db
+    Strategy: typo,ngram
+  Successfully wrote results to 'output.json'
   ```
 - **또는 출력 파일 경로 옵션(`-o` / `--output`) 사용**:
   ```bash

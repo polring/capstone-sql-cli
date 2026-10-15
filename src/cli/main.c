@@ -71,6 +71,7 @@ typedef struct {
     char **token_arguments;
     int token_argument_count;
     char *allocated_text;
+    CliMode json_sub_mode;
 } CliOptions;
 
 static char *trim_string(char *str) {
@@ -474,6 +475,7 @@ static CliOptions parse_cli_options(int argc, char **argv) {
 
     if (!strcmp(argv[2], "--json")) {
         options.mode = CLI_MODE_JSON;
+        options.json_sub_mode = CLI_MODE_QUERY;
         int idx = 3;
         if (idx >= argc) {
             fail("expected input and output json file paths: --json <input.json> "
@@ -487,8 +489,27 @@ static CliOptions parse_cli_options(int argc, char **argv) {
         }
 
         while (idx < argc) {
-            if (!strcmp(argv[idx], "-o") || !strcmp(argv[idx], "--out") ||
-                !strcmp(argv[idx], "--output")) {
+            if (!strcmp(argv[idx], "--mode") || !strcmp(argv[idx], "-m")) {
+                if (++idx >= argc) {
+                    fail("expected mode after --mode (query or generate)");
+                }
+                const char *m = argv[idx++];
+                if (!strcmp(m, "generate") || !strcmp(m, "gen")) {
+                    options.json_sub_mode = CLI_MODE_GENERATE;
+                } else if (!strcmp(m, "query") || !strcmp(m, "pipeline")) {
+                    options.json_sub_mode = CLI_MODE_QUERY;
+                } else {
+                    fail("invalid mode for --json: choose 'query' or 'generate'");
+                }
+            } else if (!strcmp(argv[idx], "--generate") ||
+                       !strcmp(argv[idx], "--gen")) {
+                options.json_sub_mode = CLI_MODE_GENERATE;
+                idx++;
+            } else if (!strcmp(argv[idx], "--query") || !strcmp(argv[idx], "-q")) {
+                options.json_sub_mode = CLI_MODE_QUERY;
+                idx++;
+            } else if (!strcmp(argv[idx], "-o") || !strcmp(argv[idx], "--out") ||
+                       !strcmp(argv[idx], "--output")) {
                 if (++idx >= argc) {
                     fail("expected output file path after -o/--output");
                 }
@@ -536,6 +557,59 @@ static CliOptions parse_cli_options(int argc, char **argv) {
     int is_gen = !strcmp(argv[2], "--generate");
     int is_query = !strcmp(argv[2], "--query") || !strcmp(argv[2], "-q") ||
                    !strcmp(argv[2], "--pipeline");
+
+    if ((is_gen || is_query) && argc >= 5 && !strcmp(argv[3], "--json")) {
+        options.mode = CLI_MODE_JSON;
+        options.json_sub_mode = is_gen ? CLI_MODE_GENERATE : CLI_MODE_QUERY;
+        options.input_json_path = argv[4];
+        int idx = 5;
+        if (idx < argc && argv[idx][0] != '-') {
+            options.output_json_path = argv[idx++];
+        }
+        while (idx < argc) {
+            if (!strcmp(argv[idx], "-o") || !strcmp(argv[idx], "--out") ||
+                !strcmp(argv[idx], "--output")) {
+                if (++idx >= argc) {
+                    fail("expected output file path after -o/--output");
+                }
+                options.output_json_path = argv[idx++];
+            } else if (!strcmp(argv[idx], "--db") || !strcmp(argv[idx], "-b")) {
+                if (++idx >= argc) {
+                    fail("unknown mode or invalid arguments");
+                }
+                options.db_path = argv[idx++];
+            } else if (!strcmp(argv[idx], "--strategy") || !strcmp(argv[idx], "-s")) {
+                if (++idx >= argc) {
+                    fail("unknown mode or invalid arguments");
+                }
+                options.strategy = argv[idx++];
+            } else if (!strcmp(argv[idx], "--dim") || !strcmp(argv[idx], "-d")) {
+                if (++idx >= argc) {
+                    fail("unknown mode or invalid arguments");
+                }
+                options.dim = parse_nonnegative_integer(argv[idx++]);
+                options.dim_specified = 1;
+            } else if (!strcmp(argv[idx], "--threshold") || !strcmp(argv[idx], "-t")) {
+                if (++idx >= argc) {
+                    fail("unknown mode or invalid arguments");
+                }
+                options.threshold = atof(argv[idx++]);
+            } else if (!strcmp(argv[idx], "--max-tokens") ||
+                       !strcmp(argv[idx], "--max-new-tokens")) {
+                if (++idx >= argc) {
+                    fail("unknown mode or invalid arguments");
+                }
+                options.max_new_tokens = parse_nonnegative_integer(argv[idx++]);
+            } else {
+                fail("unknown mode or invalid arguments");
+            }
+        }
+        if (!options.output_json_path) {
+            fail("expected output json file path: --json <input.json> <output.json>");
+        }
+        validate_strategy_and_dim(options.strategy, options.dim, options.dim_specified);
+        return options;
+    }
 
     if (is_gen || is_query) {
         options.mode = is_gen ? CLI_MODE_GENERATE : CLI_MODE_QUERY;
@@ -802,15 +876,21 @@ static void run_query_command(const Model *model, const CliOptions *options) {
     free(raw_sql);
 }
 
-static void run_json_command(const Model *model, const CliOptions *options) {
-    if (!options->input_json_path || !options->output_json_path) {
-        fail("both input and output json file paths are required: --json <input.json> "
-             "<output.json>");
+static int process_json_file(const Model *model, const char *input_path,
+                             const char *output_path, CliMode exec_mode,
+                             char **active_dict, size_t active_dict_size,
+                             const char *strategy, int dim, double threshold,
+                             int max_tokens, const char *model_path,
+                             const char *db_path) {
+    if (!input_path || !output_path) {
+        return -1;
     }
 
-    char *json_text = read_file_to_string(options->input_json_path);
+    char *json_text = read_file_to_string(input_path);
     if (!json_text) {
-        fail("failed to open or read input JSON file");
+        fprintf(stderr, "error: failed to open or read input JSON file '%s'\n",
+                input_path);
+        return -1;
     }
 
     int is_array = 0;
@@ -823,30 +903,38 @@ static void run_json_command(const Model *model, const CliOptions *options) {
         if (questions) {
             free(questions);
         }
-        fail("no 'question' field found in input JSON file");
+        fprintf(stderr, "error: no 'question' field found in input JSON file '%s'\n",
+                input_path);
+        return -1;
     }
 
-    FILE *out = open_file_utf8(options->output_json_path, "wb");
+    FILE *out = open_file_utf8(output_path, "wb");
     if (!out) {
         for (size_t i = 0; i < question_count; i++) {
             free(questions[i]);
         }
         free(questions);
-        fail("failed to open output JSON file for writing");
+        fprintf(stderr, "error: failed to open output JSON file '%s' for writing\n",
+                output_path);
+        return -1;
     }
 
-    char **dictionary = NULL;
-    size_t dict_size = 0;
-    if (options->db_path) {
-        if (load_dictionary_from_sqlite(options->db_path, &dictionary, &dict_size) !=
-            0) {
-            fprintf(stderr, "warning: cannot load schema from %s\n", options->db_path);
+    char **dictionary = active_dict;
+    size_t dict_size = active_dict_size;
+    int own_dict = 0;
+
+    if (!dictionary && db_path && *db_path) {
+        if (load_dictionary_from_sqlite(db_path, &dictionary, &dict_size) != 0) {
+            fprintf(stderr, "warning: cannot load schema from %s\n", db_path);
+            dictionary = NULL;
+            dict_size = 0;
+        } else {
+            own_dict = 1;
         }
     }
 
-    try_configure_semantic_path(
-        options->db_path ? options->db_path : options->model_path, options->dim);
-    const char *strategy = options->strategy ? options->strategy : "typo,ngram";
+    try_configure_semantic_path(db_path && *db_path ? db_path : model_path, dim);
+    const char *strat = (strategy && *strategy) ? strategy : "typo,ngram";
 
     int use_array = (is_array || question_count > 1);
     if (use_array) {
@@ -859,8 +947,9 @@ static void run_json_command(const Model *model, const CliOptions *options) {
         int *token_ids = allocate_array(model->config.context_length, sizeof(int));
         int prompt_count = prepare_prompt_tokens(model, question, token_ids);
         int token_count = prompt_count;
+        int tokens_to_gen = max_tokens > 0 ? max_tokens : DEFAULT_MAX_NEW_TOKENS;
         const char *stop_reason =
-            generate_tokens(model, token_ids, &token_count, options->max_new_tokens);
+            generate_tokens(model, token_ids, &token_count, tokens_to_gen);
         (void)stop_reason;
 
         size_t raw_sql_len = 0;
@@ -880,9 +969,9 @@ static void run_json_command(const Model *model, const CliOptions *options) {
         free(token_ids);
 
         char *fixed_sql = NULL;
-        if (dictionary && dict_size > 0) {
-            fixed_sql = process_sql(raw_sql, strategy, (const char **)dictionary,
-                                    dict_size, options->dim, options->threshold);
+        if (exec_mode != CLI_MODE_GENERATE && dictionary && dict_size > 0) {
+            fixed_sql = process_sql(raw_sql, strat, (const char **)dictionary,
+                                    dict_size, dim, threshold);
         }
         const char *final_sql =
             (fixed_sql && strncmp(fixed_sql, "Error:", 6) != 0) ? fixed_sql : raw_sql;
@@ -923,8 +1012,27 @@ static void run_json_command(const Model *model, const CliOptions *options) {
     fclose(out);
     free(questions);
 
-    if (dictionary) {
+    if (own_dict && dictionary) {
         free_dictionary(dictionary, dict_size);
+    }
+    return 0;
+}
+
+static void run_json_command(const Model *model, const CliOptions *options) {
+    if (!options->input_json_path || !options->output_json_path) {
+        fail("both input and output json file paths are required: --json <input.json> "
+             "<output.json>");
+    }
+
+    CliMode exec_mode = (options->json_sub_mode == CLI_MODE_GENERATE)
+                            ? CLI_MODE_GENERATE
+                            : CLI_MODE_QUERY;
+    int rc = process_json_file(
+        model, options->input_json_path, options->output_json_path, exec_mode, NULL, 0,
+        options->strategy, options->dim, options->threshold, options->max_new_tokens,
+        options->model_path, options->db_path);
+    if (rc != 0) {
+        fail("failed to process json file");
     }
     free_semantic_cache();
 }
@@ -1373,6 +1481,8 @@ static void print_shell_help(void) {
         "  /set threshold <float> Set semantic similarity threshold (default: 0.5)\n"
         "  /set tokens <number>   Set max new tokens to generate (default: 32)\n"
         "  /set mode <mode>       Switch mode: query (default), gen, post, enc\n"
+        "  /json <in> <out>       Process input JSON file using current mode, "
+        "database, and strategy\n"
         "  /ls [path|type]        Inspect directory and list asset bundles (/set "
         "asset),\n"
         "                         models (*.gguf), databases (*.db), and embeddings "
@@ -1710,6 +1820,38 @@ static void run_interactive_shell(const char *initial_model_path,
                     mode = CLI_MODE_ENCODE;
                 }
                 printf("Mode set to: %s\n", m);
+            } else if (!strncmp(cmd, "json ", 5) || !strcmp(cmd, "json")) {
+                char *args = trim_string(cmd + (!strncmp(cmd, "json ", 5) ? 5 : 4));
+                char in_path[256] = "";
+                char out_path[256] = "";
+                if (sscanf(args, "%255s %255s", in_path, out_path) == 2) {
+                    if (!model_loaded && mode != CLI_MODE_POSTPROCESS) {
+                        printf("Error: Model is not loaded. Use '/set model <path>' "
+                               "first.\n\n");
+                    } else {
+                        const char *cur_mode_str = (mode == CLI_MODE_GENERATE)
+                                                       ? "generate (raw SQL)"
+                                                       : "query (with postprocessing)";
+                        printf("Processing JSON: '%s' -> '%s'\n", in_path, out_path);
+                        printf("  Mode:     %s\n", cur_mode_str);
+                        printf("  Database: %s\n", db_path[0] ? db_path : "(none)");
+                        printf("  Strategy: %s\n", strategy);
+                        int rc = process_json_file(
+                            &model, in_path, out_path, mode, dictionary, dict_size,
+                            strategy, dim, threshold, max_tokens, model_path, db_path);
+                        if (rc == 0) {
+                            printf("Successfully wrote results to '%s'\n\n", out_path);
+                        } else {
+                            printf("Error: Failed to process JSON file.\n\n");
+                        }
+                    }
+                } else {
+                    printf("Usage: /json <input.json> <output.json>\n"
+                           "Note: Reflects active mode (%s), database (%s), and "
+                           "strategy (%s).\n\n",
+                           mode == CLI_MODE_GENERATE ? "generate" : "query",
+                           db_path[0] ? db_path : "none", strategy);
+                }
             } else {
                 printf("Unknown command '%s'. Type '/help' for available commands.\n",
                        line);

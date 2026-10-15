@@ -1,0 +1,22 @@
+[
+  {
+    "id": 1,
+    "question": "what city does ashley live in?",
+    "db_id": "shop"
+  },
+  {
+    "id": 2,
+    "question": "how many customers are there?",
+    "db_id": "shop"
+  },
+  {
+    "id": 3,
+    "question": "show all items with stock greater than 10",
+    "db_id": "shop"
+  },
+  {
+    "id": 4,
+    "question": "find customers whose name is john",
+    "db_id": "shop"
+  }
+]
