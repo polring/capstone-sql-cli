@@ -31,11 +31,14 @@ C 프로젝트에서 헤더를 인클루드하여 정적 라이브러리(`postpr
    - 쿼리를 단어, 문자열 리터럴, 기호, 공백 등으로 분해하여 키워드가 아닌 단어를 식별자(테이블/컬럼명)로 인식합니다.
    - 원본 대소문자 속성(`is_all_upper`)을 기록하여 교정 후 원래 대소문자에 맞게 복원합니다.
 
-3. **교정 알고리즘 (전략 및 체이닝)**:
-   - **Typo**: Python `difflib.get_close_matches(word, dictionary, cutoff=0.7)`와 동일한 문자열 일치 비율($2M / (|A| + |B|)$)로 가장 유사한 사전 단어를 탐색합니다.
-   - **N-gram**: 2-gram 부분 문자열 집합을 추출하고 Python의 `set.intersection` 및 `set.union`과 동일하게 Jaccard 유사도($|A \cap B| / (|A \cup B|)$)를 계산(cutoff $\ge 0.3$)합니다. 단어 길이가 $N$ 미만이면 Typo로 Fallback합니다.
-   - **Semantic**: Snake_case로 분리된 단어들의 임베딩 벡터를 Mean-pooling한 뒤 코사인 유사도로 타겟 사전을 검색합니다. 캐시가 없으면 파이프라인 오류 없이 안전하게 원래 단어를 반환합니다.
-   - **전략 체이닝**: `typo,ngram,semantic`처럼 쉼표로 연결된 전략 순서대로 교정을 시도하며, 먼저 교정에 성공한 전략이 나오면 즉시 중단합니다.
+3. **5단계 계단식 교정 전략 (Cascading Strategies)**:
+   - 교정 전략은 반드시 **왼쪽에서 오른쪽으로 순차적으로 누적 적용**됩니다:
+     * **Stage 0: `none`**: 원본 SQL 유지 (구 `generate` 모드와 동일, 후처리 미적용)
+     * **Stage 1: `keyword`**: 표준 SQL 예약어 사전 보정만 수행 (`SELETC` $\rightarrow$ `SELECT` 등)
+     * **Stage 2: `typo`**: 예약어 보정 + SQLite DB 스키마 기반 Levenshtein/Gestalt 비율 유사도 교정 (cutoff $\ge 0.7$)
+     * **Stage 3: `ngram`**: 예약어 + Typo + Jaccard 2-gram 유사도 매칭 (cutoff $\ge 0.3$)
+     * **Stage 4: `semantic`**: 예약어 + Typo + N-gram + GloVe 단어 임베딩 코사인 유사도 교정
+   - **체이닝 규칙**: 단일 이름(`keyword`, `typo`, `ngram`, `semantic`, `none`) 또는 누적 순서(`keyword,typo`, `keyword,typo,ngram` 등)로 지정할 수 있으며, 뒤쪽 옵션은 생략 가능하나 중간 단계를 건너뛰거나 순서를 역전할 수는 없습니다.
 
 ---
 
@@ -51,6 +54,7 @@ cmake --build build --config Release
 
 빌드 산출물:
 * `build/postprocessor.lib` (또는 `libpostprocessor.a`): 다른 C 애플리케이션 및 CLI에서 링크 가능한 정적 라이브러리
+* `build/sql_engine.dll` (또는 `libsql_engine.so`): GUI / C# P/Invoke 연동용 동적 공유 라이브러리
 * `build/test_postprocessor`: 단위 테스트 실행 파일
 
 ### C 단위 테스트 실행
@@ -63,33 +67,72 @@ Python pytest와 동일한 시나리오(예약어 보정, 식별자 보정, 복�
 
 ---
 
-## 4. 라이브러리로 사용하기 (`#include "postprocessor.h"`)
+## 4. 라이브러리로 사용하기
 
-다른 C 프로그램에서 라이브러리로 임포트하여 사용할 때는 `postprocessor.h`를 인클루드하고 정적 라이브러리를 링크합니다.
+### 1) 통합 C API (`sql_postprocess`) - 권장
+동적 공유 라이브러리(`sql_engine.dll`) 또는 `pipeline.h`를 통해 DB 스키마 로드와 교정을 원스톱으로 처리합니다:
 
-### C 코드 예제:
+```c
+#include "pipeline.h"
+#include <stdio.h>
+#include <stdlib.h>
+
+int main(void) {
+    const char *input_sql = "SELETC usr_name, emil FRMO users WHERE manger_id = 1";
+    
+    // 5단계 계단식 전략: "none", "keyword", "typo", "ngram", "semantic"
+    char *fixed_sql = sql_postprocess(input_sql, "ngram", "shop.db", 0, 0.0);
+    
+    if (fixed_sql != NULL) {
+        printf("교정 결과: %s\n", fixed_sql);
+        // 출력: SELECT user_name, email FROM users WHERE manager_id = 1
+        sql_free_string(fixed_sql);
+    }
+    return 0;
+}
+```
+
+### 2) C# P/Invoke 바인딩 (`SqlEngine.Core` - Uno Platform GUI 연동)
+C# .NET 8 및 Uno Platform GUI 프로젝트에서는 `SqlPipeline.Postprocess()`를 직접 호출할 수 있습니다.
+`sql_engine.dll`은 `SqlEngine.Core.csproj` 빌드 시 자동으로 출력 디렉터리에 복사됩니다.
+
+```csharp
+using SqlEngine.Core;
+
+// 1. 단독 SQL 오타 교정
+string correctedSql = SqlPipeline.Postprocess(
+    sql: "SELETC usr_name, emil FRMO users WHERE manger_id = 1",
+    strategy: "ngram", // 5단계 계단식 전략
+    dbPath: "shop.db"
+);
+
+Console.WriteLine($"교정 결과: {correctedSql}");
+// 출력: SELECT user_name, email FROM users WHERE manager_id = 1
+
+// 2. GUI 프로세스 보호 안전 장치 (Crash Prevention)
+// 비 ASCII 입력(한글 등)이나 잘못된 쿼리가 전달되더라도 C 엔진 내부의
+// thread-local setjmp/longjmp bailout 메커니즘을 통해 GUI 호스트 프로세스가
+// 비정상 종료(exit(1))되지 않고 안전하게 null 반환 및 에러 문자열을 기록합니다.
+```
+
+### 3) 저수준 C API (`postprocessor.h`)
+정적 라이브러리 직접 링크 시 토크나이저와 사전 배열을 직접 전달하여 사용할 수 있습니다:
+
 ```c
 #include "postprocessor.h"
 #include <stdio.h>
 #include <stdlib.h>
 
 int main(void) {
-    /* 1. 스키마 사전 정의 (또는 load_dictionary_from_sqlite 사용) */
     const char *dictionary[] = {
         "users", "user_name", "email", "id", "name", "department", "manager_id"
     };
     size_t dict_size = sizeof(dictionary) / sizeof(dictionary[0]);
 
-    /* 2. 교정할 SQL 입력 (예약어 및 컬럼 오타 포함) */
     const char *input_sql = "SELETC usr_name, emil FRMO users WHERE manger_id = 1";
-
-    /* 3. process_sql 호출 (전략: typo,ngram) */
     char *fixed_sql = process_sql(input_sql, "typo,ngram", dictionary, dict_size, 0, 0.0);
 
     printf("교정 결과: %s\n", fixed_sql);
-    /* 출력: SELECT user_name, email FROM users WHERE manager_id = 1 */
-
-    /* 4. 메모리 해제 */
     free(fixed_sql);
     free_semantic_cache();
     return 0;
@@ -101,16 +144,23 @@ int main(void) {
 ## 5. CLI 단독 후처리 도구로 사용하기 (`sql-cli --postprocess`)
 
 신경망 모델 없이 입력 SQL만 직접 교정할 때는 통합 CLI 도구인 `sql-cli`의 `--postprocess` 모드를 사용합니다.
+한 줄 실행 시 모든 옵션을 명시적으로 지정해야 합니다 (기본값 없음):
 
 ```bash
-# 1. 기본 실행 (스키마 DB 연동)
-./build/sql-cli --postprocess "SELETC usr_name, emil FRMO users" --db assets/stage1-contract2-rc1/shop.db
+# 1. 예약어 보정만 적용 (Stage 1: keyword, --db 불필요)
+./build/sql-cli --postprocess "SELETC * FRMO users" --strategy keyword
 
-# 2. 특정 전략만 지정하여 실행 (N-gram)
+# 2. Typo 오타 교정 적용 (Stage 2: typo, --db 필수)
+./build/sql-cli --postprocess "SELETC usr_name, emil FRMO users" --strategy typo --db assets/stage1-contract2-rc1/shop.db
+
+# 3. N-gram 매칭 교정 적용 (Stage 3: ngram, --db 필수)
 ./build/sql-cli --postprocess "SELECT id FROM departmnt" --strategy ngram --db assets/stage1-contract2-rc1/shop.db
 
-# 3. GloVe 차원 지정하여 Semantic 전략 포함 실행
-./build/sql-cli --postprocess "SELECT usr FROM users" --strategy typo,ngram,semantic --dim 100 --threshold 0.5 --db assets/stage1-contract2-rc1/shop.db
+# 4. GloVe 차원 및 코사인 임계값 지정하여 Semantic 교정 (Stage 4: semantic, --db, --dim, --threshold 필수)
+./build/sql-cli --postprocess "SELECT usr FROM users" --strategy semantic --dim 300 --threshold 0.5 --db assets/stage1-contract2-rc1/shop.db
+
+# 5. JSON 파일 일괄 후처리 (input.json 내 "sql" 키 탐색 -> output.json 내 "input", "output"으로 저장)
+./build/sql-cli --postprocess --json input_sql.json output_sql.json --strategy typo --db assets/stage1-contract2-rc1/shop.db
 ```
 
 ---
@@ -123,4 +173,4 @@ int main(void) {
 # Release에서 300d 임베딩 파일 다운로드
 scripts/fetch-assets stage1-contract2-rc1 embedding
 ```
-이후 `--dim 300` 옵션을 지정하면 동일 폴더의 `semantic_dict_300d.bin`을 자동으로 탐색하여 로드합니다.
+이후 `--strategy semantic --dim 300` 옵션을 지정하면 동일 폴더의 `semantic_dict_300d.bin`을 로드하여 사용합니다.

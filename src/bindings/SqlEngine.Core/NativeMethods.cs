@@ -40,5 +40,13 @@ namespace SqlEngine.Core
 
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
         public static extern IntPtr sql_get_last_error();
+
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern IntPtr sql_postprocess(
+            [MarshalAs(UnmanagedType.LPUTF8Str)] string sql,
+            [MarshalAs(UnmanagedType.LPUTF8Str)] string strategy,
+            [MarshalAs(UnmanagedType.LPUTF8Str)] string? dbPath,
+            int dim,
+            double threshold);
     }
 }

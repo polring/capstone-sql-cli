@@ -4,6 +4,7 @@
 #include "../postprocessor/replacement.h"
 #include "../postprocessor/schema.h"
 
+#include <setjmp.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -76,8 +77,24 @@ char *sql_pipeline_run(SqlPipeline *pipeline, const char *question, int max_new_
         return NULL;
     }
 
+    int *token_ids = NULL;
+    char *raw_sql = NULL;
+
+    jmp_buf bailout;
+    void *prev_bailout = sql_push_bailout(&bailout);
+    if (setjmp(bailout) != 0) {
+        sql_pop_bailout(prev_bailout);
+        if (token_ids) {
+            free(token_ids);
+        }
+        if (raw_sql) {
+            free(raw_sql);
+        }
+        return NULL;
+    }
+
     int capacity = pipeline->model.config.context_length;
-    int *token_ids = (int *)allocate_array(capacity, sizeof(int));
+    token_ids = (int *)allocate_array(capacity, sizeof(int));
     int prompt_count = prepare_prompt_tokens(&pipeline->model, question, token_ids);
     int token_count = prompt_count;
 
@@ -97,9 +114,11 @@ char *sql_pipeline_run(SqlPipeline *pipeline, const char *question, int max_new_
         raw_sql_len += pipeline->model.tokenizer.token_byte_lengths[token_id];
     }
 
-    char *raw_sql = (char *)malloc(raw_sql_len + 1);
+    raw_sql = (char *)malloc(raw_sql_len + 1);
     if (!raw_sql) {
         free(token_ids);
+        sql_pop_bailout(prev_bailout);
+        sql_set_last_error("failed to allocate memory for raw_sql");
         return NULL;
     }
 
@@ -113,6 +132,10 @@ char *sql_pipeline_run(SqlPipeline *pipeline, const char *question, int max_new_
     raw_sql[raw_sql_len] = '\0';
 
     free(token_ids);
+    token_ids = NULL;
+
+    /* Inference completed safely, restore previous bailout target */
+    sql_pop_bailout(prev_bailout);
 
     /* 후처리 실행 */
     char *processed_sql = NULL;
@@ -129,6 +152,14 @@ char *sql_pipeline_run(SqlPipeline *pipeline, const char *question, int max_new_
 
     if (!processed_sql) {
         /* 후처리 실패 시 raw_sql 복사본 반환 */
+        processed_sql = (char *)malloc(raw_sql_len + 1);
+        if (processed_sql) {
+            memcpy(processed_sql, raw_sql, raw_sql_len + 1);
+        }
+    } else if (strncmp(processed_sql, "Error:", 6) == 0) {
+        /* 전략 오류 발생 시 last_error에 기록하고 raw_sql 복사본으로 안전하게 폴백 */
+        sql_set_last_error(processed_sql);
+        free(processed_sql);
         processed_sql = (char *)malloc(raw_sql_len + 1);
         if (processed_sql) {
             memcpy(processed_sql, raw_sql, raw_sql_len + 1);
@@ -162,4 +193,47 @@ void sql_free_string(char *str) {
     if (str) {
         free(str);
     }
+}
+
+char *sql_postprocess(const char *sql, const char *strategy, const char *db_path,
+                      int dim, double threshold) {
+    if (!sql) {
+        sql_set_last_error("sql query is null");
+        return NULL;
+    }
+
+    char **dictionary = NULL;
+    size_t dict_size = 0;
+    if (db_path && strlen(db_path) > 0) {
+        if (load_dictionary_from_sqlite(db_path, &dictionary, &dict_size) != 0) {
+            dictionary = NULL;
+            dict_size = 0;
+        }
+    }
+
+    const char *strat = (strategy && *strategy) ? strategy : "keyword";
+    char *result =
+        process_sql(sql, strat, (const char **)dictionary, dict_size, dim, threshold);
+
+    if (dictionary) {
+        free_dictionary(dictionary, dict_size);
+    }
+
+    if (!result) {
+        size_t len = strlen(sql);
+        result = (char *)malloc(len + 1);
+        if (result) {
+            memcpy(result, sql, len + 1);
+        }
+    } else if (strncmp(result, "Error:", 6) == 0) {
+        sql_set_last_error(result);
+        free(result);
+        size_t len = strlen(sql);
+        result = (char *)malloc(len + 1);
+        if (result) {
+            memcpy(result, sql, len + 1);
+        }
+    }
+
+    return result;
 }

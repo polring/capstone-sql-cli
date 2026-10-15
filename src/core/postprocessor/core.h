@@ -6,6 +6,7 @@
 #ifndef POSTPROCESSOR_CORE_H
 #define POSTPROCESSOR_CORE_H
 
+#include "common.h"
 #include <stddef.h>
 
 #ifdef __cplusplus
@@ -23,11 +24,12 @@ typedef enum {
         4 /* Stage 4: Stage 3 + Semantic embedding correction */
 } PostprocessLevel;
 
-int parse_postprocess_level(const char *strategy, PostprocessLevel *out_level);
-const char *postprocess_level_to_string(PostprocessLevel level);
+SQL_API int parse_postprocess_level(const char *strategy, PostprocessLevel *out_level);
+SQL_API const char *postprocess_level_to_string(PostprocessLevel level);
 
-char *process_sql(const char *sql_query, const char *strategy, const char **dictionary,
-                  size_t dict_size, int dim, double threshold);
+SQL_API char *process_sql(const char *sql_query, const char *strategy,
+                          const char **dictionary, size_t dict_size, int dim,
+                          double threshold);
 
 #ifdef __cplusplus
 }

@@ -65,6 +65,8 @@ extern "C" {
 SQL_API void fail(const char *message);
 SQL_API const char *sql_get_last_error(void);
 SQL_API void sql_set_last_error(const char *message);
+SQL_API void *sql_push_bailout(void *bailout_target);
+SQL_API void sql_pop_bailout(void *prev_bailout);
 SQL_API void *allocate_array(size_t count, size_t element_size);
 SQL_API void append_token_id(int *token_ids, int *token_count, int capacity,
                              int token_id);

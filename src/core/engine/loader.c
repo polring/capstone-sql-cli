@@ -92,6 +92,16 @@ SQL_API void sql_set_last_error(const char *message) {
     }
 }
 
+SQL_API void *sql_push_bailout(void *bailout_target) {
+    void *prev = (void *)s_current_bailout;
+    s_current_bailout = (jmp_buf *)bailout_target;
+    return prev;
+}
+
+SQL_API void sql_pop_bailout(void *prev_bailout) {
+    s_current_bailout = (jmp_buf *)prev_bailout;
+}
+
 #ifdef _WIN32
 static FILE *open_file_utf8(const char *path, const char *mode) {
     if (!path || !mode) {

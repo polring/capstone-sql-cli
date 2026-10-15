@@ -7,5 +7,13 @@
     <RootNamespace>SqlEngine.Core</RootNamespace>
     <AssemblyName>SqlEngine.Core</AssemblyName>
   </PropertyGroup>
+ 
+  <ItemGroup Condition="Exists('$(MSBuildThisFileDirectory)..\..\..\build\sql_engine.dll')">
+    <None Include="$(MSBuildThisFileDirectory)..\..\..\build\sql_engine.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>sql_engine.dll</Link>
+      <Visible>false</Visible>
+    </None>
+  </ItemGroup>
 
 </Project>

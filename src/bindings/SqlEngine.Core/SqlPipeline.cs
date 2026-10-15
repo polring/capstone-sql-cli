@@ -83,6 +83,31 @@ namespace SqlEngine.Core
             }
         }
 
+        public static string Postprocess(string sql, string strategy, string? dbPath = null, int dim = 0, double threshold = 0.0)
+        {
+            if (sql == null)
+            {
+                throw new ArgumentNullException(nameof(sql));
+            }
+
+            IntPtr resPtr = NativeMethods.sql_postprocess(sql, strategy, dbPath, dim, threshold);
+            if (resPtr == IntPtr.Zero)
+            {
+                IntPtr errPtr = NativeMethods.sql_get_last_error();
+                string err = errPtr != IntPtr.Zero ? Marshal.PtrToStringUTF8(errPtr) ?? "Postprocessing failed" : "Postprocessing failed";
+                throw new InvalidOperationException($"Postprocessing failed: {err}");
+            }
+
+            try
+            {
+                return Marshal.PtrToStringUTF8(resPtr) ?? string.Empty;
+            }
+            finally
+            {
+                NativeMethods.sql_free_string(resPtr);
+            }
+        }
+
         private void ThrowIfDisposed()
         {
             if (_disposed)

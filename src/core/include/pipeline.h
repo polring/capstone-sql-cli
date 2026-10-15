@@ -32,6 +32,10 @@ SQL_API void sql_pipeline_destroy(SqlPipeline *pipeline);
 /* 라이브러리에서 동적 할당된 문자열 메모리 해제 */
 SQL_API void sql_free_string(char *str);
 
+/* 단독 후처리 수행 (모델 없이 SQL 오타 직접 교정) */
+SQL_API char *sql_postprocess(const char *sql, const char *strategy,
+                              const char *db_path, int dim, double threshold);
+
 /* 스레드 로컬 마지막 발생 에러 메시지 조회 및 설정 */
 SQL_API const char *sql_get_last_error(void);
 SQL_API void sql_set_last_error(const char *message);
