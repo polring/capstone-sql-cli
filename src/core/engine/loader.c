@@ -69,7 +69,73 @@ typedef struct {
 
 /* ------------------------- Memory and binary reading ---------------------- */
 
+#include <setjmp.h>
+#if defined(_WIN32)
+#include <windows.h>
+static __declspec(thread) jmp_buf *s_current_bailout = NULL;
+static __declspec(thread) char s_last_error_message[512] = "";
+#else
+static _Thread_local jmp_buf *s_current_bailout = NULL;
+static _Thread_local char s_last_error_message[512] = "";
+#endif
+
+SQL_API const char *sql_get_last_error(void) {
+    return s_last_error_message;
+}
+
+SQL_API void sql_set_last_error(const char *message) {
+    if (message) {
+        strncpy(s_last_error_message, message, sizeof(s_last_error_message) - 1);
+        s_last_error_message[sizeof(s_last_error_message) - 1] = '\0';
+    } else {
+        s_last_error_message[0] = '\0';
+    }
+}
+
+SQL_API void *sql_push_bailout(void *bailout_target) {
+    void *prev = (void *)s_current_bailout;
+    s_current_bailout = (jmp_buf *)bailout_target;
+    return prev;
+}
+
+SQL_API void sql_pop_bailout(void *prev_bailout) {
+    s_current_bailout = (jmp_buf *)prev_bailout;
+}
+
+#ifdef _WIN32
+static FILE *open_file_utf8(const char *path, const char *mode) {
+    if (!path || !mode) {
+        return NULL;
+    }
+    int wlen_path = MultiByteToWideChar(CP_UTF8, 0, path, -1, NULL, 0);
+    int wlen_mode = MultiByteToWideChar(CP_UTF8, 0, mode, -1, NULL, 0);
+    if (wlen_path > 0 && wlen_mode > 0) {
+        wchar_t *wpath = (wchar_t *)malloc(wlen_path * sizeof(wchar_t));
+        wchar_t *wmode = (wchar_t *)malloc(wlen_mode * sizeof(wchar_t));
+        if (wpath && wmode) {
+            MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath, wlen_path);
+            MultiByteToWideChar(CP_UTF8, 0, mode, -1, wmode, wlen_mode);
+            FILE *f = _wfopen(wpath, wmode);
+            free(wpath);
+            free(wmode);
+            return f;
+        }
+        free(wpath);
+        free(wmode);
+    }
+    return fopen(path, mode);
+}
+#else
+static FILE *open_file_utf8(const char *path, const char *mode) {
+    return fopen(path, mode);
+}
+#endif
+
 void fail(const char *message) {
+    sql_set_last_error(message);
+    if (s_current_bailout) {
+        longjmp(*s_current_bailout, 1);
+    }
     fprintf(stderr, "error: %s\n", message);
     exit(1);
 }
@@ -134,15 +200,17 @@ static char *read_string(BinaryReader *reader) {
 }
 
 static BinaryReader read_model_file(const char *path) {
-    FILE *file = fopen(path, "rb");
+    FILE *file = open_file_utf8(path, "rb");
     if (!file) {
         fail("cannot open model file");
     }
     if (fseek(file, 0, SEEK_END)) {
+        fclose(file);
         fail("cannot seek model");
     }
     long file_size = ftell(file);
     if (file_size < 24 || (size_t)file_size > MAX_ALLOCATION_BYTES) {
+        fclose(file);
         fail("model size outside baseline limit");
     }
     rewind(file);
@@ -150,6 +218,8 @@ static BinaryReader read_model_file(const char *path) {
     reader.size = (size_t)file_size;
     reader.data = allocate_array(reader.size, 1);
     if (fread(reader.data, 1, reader.size, file) != reader.size) {
+        fclose(file);
+        free(reader.data);
         fail("cannot read model");
     }
     fclose(file);
@@ -641,14 +711,37 @@ static void build_token_pieces(Model *model) {
 
 Model load_model(const char *path) {
     Model model = {0};
-    BinaryReader reader = read_model_file(path);
+    if (!path) {
+        fail("model path is null");
+        return model;
+    }
+    jmp_buf bailout;
+    jmp_buf *prev_bailout = s_current_bailout;
+    s_current_bailout = &bailout;
+    BinaryReader reader = {0};
+
+    if (setjmp(bailout) != 0) {
+        s_current_bailout = prev_bailout;
+        if (reader.data) {
+            free(reader.data);
+            reader.data = NULL;
+        }
+        release_model(&model);
+        memset(&model, 0, sizeof(Model));
+        return model;
+    }
+
+    reader = read_model_file(path);
     size_t metadata_count = read_gguf_header(&reader, &model);
     read_model_metadata(&reader, &model, metadata_count);
     read_tensor_descriptors(&reader, &model);
     read_tensor_values(&reader, &model);
     free(reader.data);
+    reader.data = NULL;
     validate_model_weights(&model);
     build_token_pieces(&model);
+
+    s_current_bailout = prev_bailout;
     return model;
 }
 
@@ -1155,23 +1248,49 @@ const char *generate_tokens(const Model *model, int *token_ids, int *token_count
 }
 
 static void release_tokenizer(Tokenizer *tokenizer, int vocab_size) {
-    for (size_t index = 0; index < tokenizer->seed_count; index++) {
-        free(tokenizer->seed_tokens[index]);
+    if (!tokenizer) {
+        return;
     }
-    free(tokenizer->seed_tokens);
-    free(tokenizer->merges);
-    for (int token_id = 0; token_id < vocab_size; token_id++) {
-        free(tokenizer->token_bytes[token_id]);
+    if (tokenizer->seed_tokens) {
+        for (size_t index = 0; index < tokenizer->seed_count; index++) {
+            free(tokenizer->seed_tokens[index]);
+        }
+        free(tokenizer->seed_tokens);
+        tokenizer->seed_tokens = NULL;
     }
-    free(tokenizer->token_bytes);
-    free(tokenizer->token_byte_lengths);
+    tokenizer->seed_count = 0;
+    if (tokenizer->merges) {
+        free(tokenizer->merges);
+        tokenizer->merges = NULL;
+    }
+    tokenizer->merge_count = 0;
+    if (tokenizer->token_bytes) {
+        for (int token_id = 0; token_id < vocab_size; token_id++) {
+            free(tokenizer->token_bytes[token_id]);
+        }
+        free(tokenizer->token_bytes);
+        tokenizer->token_bytes = NULL;
+    }
+    if (tokenizer->token_byte_lengths) {
+        free(tokenizer->token_byte_lengths);
+        tokenizer->token_byte_lengths = NULL;
+    }
 }
 
 void release_model(Model *model) {
-    for (size_t index = 0; index < model->tensor_count; index++) {
-        free(model->tensors[index].name);
-        free(model->tensors[index].values);
+    if (!model) {
+        return;
     }
-    free(model->tensors);
+    if (model->tensors) {
+        for (size_t index = 0; index < model->tensor_count; index++) {
+            free(model->tensors[index].name);
+            free(model->tensors[index].values);
+        }
+        free(model->tensors);
+        model->tensors = NULL;
+    }
+    model->tensor_count = 0;
     release_tokenizer(&model->tokenizer, model->config.vocab_size);
+    memset(&model->tokenizer, 0, sizeof(Tokenizer));
+    memset(&model->config, 0, sizeof(ModelConfig));
 }

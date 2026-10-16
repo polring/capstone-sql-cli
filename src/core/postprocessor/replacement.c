@@ -35,11 +35,9 @@ static void to_upper_str(const char *src, char *dst, size_t max_len) {
 /* 1. Typo Correction (difflib SequenceMatcher ratio / Gestalt Pattern Matching) */
 /* -------------------------------------------------------------------------- */
 
-static void find_longest_match_ci(
-    const char *a, int alo, int ahi,
-    const char *b, int blo, int bhi,
-    int *best_i, int *best_j, int *best_size
-) {
+static void find_longest_match_ci(const char *a, int alo, int ahi, const char *b,
+                                  int blo, int bhi, int *best_i, int *best_j,
+                                  int *best_size) {
     *best_i = alo;
     *best_j = blo;
     *best_size = 0;
@@ -47,7 +45,8 @@ static void find_longest_match_ci(
         for (int j = blo; j < bhi; j++) {
             int k = 0;
             while (i + k < ahi && j + k < bhi &&
-                   tolower((unsigned char)a[i + k]) == tolower((unsigned char)b[j + k])) {
+                   tolower((unsigned char)a[i + k]) ==
+                       tolower((unsigned char)b[j + k])) {
                 k++;
             }
             if (k > *best_size) {
@@ -59,41 +58,53 @@ static void find_longest_match_ci(
     }
 }
 
-static int get_matching_chars_ci(
-    const char *a, int alo, int ahi,
-    const char *b, int blo, int bhi
-) {
+static int get_matching_chars_ci(const char *a, int alo, int ahi, const char *b,
+                                 int blo, int bhi) {
     int best_i, best_j, best_size;
     find_longest_match_ci(a, alo, ahi, b, blo, bhi, &best_i, &best_j, &best_size);
-    if (best_size == 0) return 0;
+    if (best_size == 0) {
+        return 0;
+    }
     int total = best_size;
     if (alo < best_i && blo < best_j) {
         total += get_matching_chars_ci(a, alo, best_i, b, blo, best_j);
     }
     if (best_i + best_size < ahi && best_j + best_size < bhi) {
-        total += get_matching_chars_ci(a, best_i + best_size, ahi, b, best_j + best_size, bhi);
+        total += get_matching_chars_ci(a, best_i + best_size, ahi, b,
+                                       best_j + best_size, bhi);
     }
     return total;
 }
 
 double difflib_similarity(const char *a, const char *b) {
-    if (!a || !b) return 0.0;
+    if (!a || !b) {
+        return 0.0;
+    }
     int len_a = (int)strlen(a);
     int len_b = (int)strlen(b);
-    if (len_a == 0 && len_b == 0) return 1.0;
-    if (len_a == 0 || len_b == 0) return 0.0;
+    if (len_a == 0 && len_b == 0) {
+        return 1.0;
+    }
+    if (len_a == 0 || len_b == 0) {
+        return 0.0;
+    }
     int matches = get_matching_chars_ci(a, 0, len_a, b, 0, len_b);
     return 2.0 * matches / (double)(len_a + len_b);
 }
 
-const char *typo_correction(const char *word, const char **dictionary, size_t dict_size) {
-    if (!word || !dictionary || dict_size == 0) return word;
+const char *typo_correction(const char *word, const char **dictionary,
+                            size_t dict_size) {
+    if (!word || !dictionary || dict_size == 0) {
+        return word;
+    }
 
     double best_score = 0.0;
     const char *best_match = word;
 
     for (size_t i = 0; i < dict_size; i++) {
-        if (!dictionary[i]) continue;
+        if (!dictionary[i]) {
+            continue;
+        }
         double score = difflib_similarity(word, dictionary[i]);
         if (score > best_score && score >= 0.7) {
             best_score = score;
@@ -121,11 +132,15 @@ static int cmp_ushort(const void *a, const void *b) {
 static NgramSet make_ngrams(const char *word, int n) {
     NgramSet set = {NULL, 0};
     int len = (int)strlen(word);
-    if (len < n || n != 2) return set;
+    if (len < n || n != 2) {
+        return set;
+    }
 
     size_t total = (size_t)(len - n + 1);
     unsigned short *temp = (unsigned short *)malloc(sizeof(unsigned short) * total);
-    if (!temp) return set;
+    if (!temp) {
+        return set;
+    }
 
     for (size_t i = 0; i < total; i++) {
         unsigned char c1 = (unsigned char)tolower((unsigned char)word[i]);
@@ -147,8 +162,11 @@ static NgramSet make_ngrams(const char *word, int n) {
     return set;
 }
 
-const char *ngram_correction(const char *word, const char **dictionary, size_t dict_size, int n, double cutoff) {
-    if (!word || !dictionary || dict_size == 0) return word;
+const char *ngram_correction(const char *word, const char **dictionary,
+                             size_t dict_size, int n, double cutoff) {
+    if (!word || !dictionary || dict_size == 0) {
+        return word;
+    }
 
     int word_len = (int)strlen(word);
     if (word_len < n) {
@@ -165,10 +183,14 @@ const char *ngram_correction(const char *word, const char **dictionary, size_t d
 
     for (size_t i = 0; i < dict_size; i++) {
         const char *dict_word = dictionary[i];
-        if (!dict_word || (int)strlen(dict_word) < n) continue;
+        if (!dict_word || (int)strlen(dict_word) < n) {
+            continue;
+        }
 
         NgramSet dict_grams = make_ngrams(dict_word, n);
-        if (dict_grams.count == 0) continue;
+        if (dict_grams.count == 0) {
+            continue;
+        }
 
         /* Compute intersection */
         size_t p = 0, q = 0, intersection = 0;
@@ -185,7 +207,8 @@ const char *ngram_correction(const char *word, const char **dictionary, size_t d
         }
 
         size_t union_count = word_grams.count + dict_grams.count - intersection;
-        double score = union_count > 0 ? (double)intersection / (double)union_count : 0.0;
+        double score =
+            union_count > 0 ? (double)intersection / (double)union_count : 0.0;
 
         if (score > best_score && score >= cutoff) {
             best_score = score;
@@ -215,8 +238,68 @@ typedef struct {
 } SemanticCache;
 
 static SemanticCache g_semantic_cache = {0, 0, NULL};
+static char g_custom_semantic_path[512] = "";
 
-void free_semantic_cache(void) {
+#if defined(_WIN32)
+#include <windows.h>
+static CRITICAL_SECTION s_cache_cs;
+static volatile LONG s_cache_init = 0;
+
+static void init_cache_lock(void) {
+    if (InterlockedCompareExchange(&s_cache_init, 1, 0) == 0) {
+        InitializeCriticalSection(&s_cache_cs);
+    }
+}
+
+static void lock_cache(void) {
+    init_cache_lock();
+    EnterCriticalSection(&s_cache_cs);
+}
+
+static void unlock_cache(void) {
+    LeaveCriticalSection(&s_cache_cs);
+}
+
+static FILE *open_file_utf8(const char *path, const char *mode) {
+    if (!path || !mode) {
+        return NULL;
+    }
+    int wlen_path = MultiByteToWideChar(CP_UTF8, 0, path, -1, NULL, 0);
+    int wlen_mode = MultiByteToWideChar(CP_UTF8, 0, mode, -1, NULL, 0);
+    if (wlen_path > 0 && wlen_mode > 0) {
+        wchar_t *wpath = (wchar_t *)malloc(wlen_path * sizeof(wchar_t));
+        wchar_t *wmode = (wchar_t *)malloc(wlen_mode * sizeof(wchar_t));
+        if (wpath && wmode) {
+            MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath, wlen_path);
+            MultiByteToWideChar(CP_UTF8, 0, mode, -1, wmode, wlen_mode);
+            FILE *f = _wfopen(wpath, wmode);
+            free(wpath);
+            free(wmode);
+            return f;
+        }
+        free(wpath);
+        free(wmode);
+    }
+    return fopen(path, mode);
+}
+#else
+#include <pthread.h>
+static pthread_mutex_t s_cache_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static void lock_cache(void) {
+    pthread_mutex_lock(&s_cache_mutex);
+}
+
+static void unlock_cache(void) {
+    pthread_mutex_unlock(&s_cache_mutex);
+}
+
+static FILE *open_file_utf8(const char *path, const char *mode) {
+    return fopen(path, mode);
+}
+#endif
+
+static void free_semantic_cache_unlocked(void) {
     if (g_semantic_cache.entries) {
         for (size_t i = 0; i < g_semantic_cache.count; i++) {
             if (g_semantic_cache.entries[i].word) {
@@ -233,10 +316,18 @@ void free_semantic_cache(void) {
     g_semantic_cache.dim = 0;
 }
 
+void free_semantic_cache(void) {
+    lock_cache();
+    free_semantic_cache_unlocked();
+    unlock_cache();
+}
+
 /* Load semantic embeddings from binary (.bin) format */
 static int load_semantic_bin_file(const char *path, int dim) {
-    FILE *f = fopen(path, "rb");
-    if (!f) return -1;
+    FILE *f = open_file_utf8(path, "rb");
+    if (!f) {
+        return -1;
+    }
 
     char magic[4];
     if (fread(magic, 1, 4, f) != 4 || memcmp(magic, "SEMA", 4) != 0) {
@@ -257,9 +348,10 @@ static int load_semantic_bin_file(const char *path, int dim) {
         return -1;
     }
 
-    free_semantic_cache();
+    free_semantic_cache_unlocked();
 
-    EmbeddingEntry *entries = (EmbeddingEntry *)malloc(sizeof(EmbeddingEntry) * file_count);
+    EmbeddingEntry *entries =
+        (EmbeddingEntry *)malloc(sizeof(EmbeddingEntry) * file_count);
     if (!entries) {
         fclose(f);
         return -1;
@@ -268,17 +360,29 @@ static int load_semantic_bin_file(const char *path, int dim) {
     size_t loaded = 0;
     for (size_t i = 0; i < file_count; i++) {
         uint8_t wlen = 0;
-        if (fread(&wlen, 1, 1, f) != 1) break;
+        if (fread(&wlen, 1, 1, f) != 1) {
+            break;
+        }
 
         char *wbuf = (char *)malloc(wlen + 1);
-        if (!wbuf) break;
-        if (fread(wbuf, 1, wlen, f) != wlen) { free(wbuf); break; }
+        if (!wbuf) {
+            break;
+        }
+        if (fread(wbuf, 1, wlen, f) != wlen) {
+            free(wbuf);
+            break;
+        }
         wbuf[wlen] = '\0';
 
         float *vbuf = (float *)malloc(sizeof(float) * dim);
-        if (!vbuf) { free(wbuf); break; }
+        if (!vbuf) {
+            free(wbuf);
+            break;
+        }
         if (fread(vbuf, sizeof(float), dim, f) != (size_t)dim) {
-            free(wbuf); free(vbuf); break;
+            free(wbuf);
+            free(vbuf);
+            break;
         }
 
         entries[loaded].word = wbuf;
@@ -299,20 +403,22 @@ static int load_semantic_bin_file(const char *path, int dim) {
     return 0;
 }
 
-static char g_custom_semantic_path[512] = "";
-
 void set_semantic_embedding_path(const char *path) {
+    lock_cache();
     if (path && *path) {
         strncpy(g_custom_semantic_path, path, sizeof(g_custom_semantic_path) - 1);
         g_custom_semantic_path[sizeof(g_custom_semantic_path) - 1] = '\0';
     } else {
         g_custom_semantic_path[0] = '\0';
     }
+    unlock_cache();
 }
 
 /* Auto-search and load semantic embeddings for given dimension */
 static int ensure_semantic_cache(int dim) {
-    if (dim <= 0) return -1;
+    if (dim <= 0) {
+        return -1;
+    }
     if (g_semantic_cache.entries != NULL && g_semantic_cache.dim == dim) {
         return 0;
     }
@@ -327,17 +433,15 @@ static int ensure_semantic_cache(int dim) {
     }
 
     /* 2. Search candidate patterns under assets/ directory */
-    const char *bin_patterns[] = {
-        "assets/stage1-contract2-rc1/semantic_dict_%dd.bin",
-        "assets/stage1-contract2/semantic_dict_%dd.bin",
-        "assets/stage2-contract2/semantic_dict_%dd.bin",
-        "assets/default/semantic_dict_%dd.bin",
-        "assets/semantic_dict_%dd.bin",
-        "models/stage1-contract2-rc1/semantic_dict_%dd.bin",
-        "models/stage1-contract2/semantic_dict_%dd.bin",
-        "models/semantic_dict_%dd.bin",
-        "semantic_dict_%dd.bin"
-    };
+    const char *bin_patterns[] = {"assets/stage1-contract2-rc1/semantic_dict_%dd.bin",
+                                  "assets/stage1-contract2/semantic_dict_%dd.bin",
+                                  "assets/stage2-contract2/semantic_dict_%dd.bin",
+                                  "assets/default/semantic_dict_%dd.bin",
+                                  "assets/semantic_dict_%dd.bin",
+                                  "models/stage1-contract2-rc1/semantic_dict_%dd.bin",
+                                  "models/stage1-contract2/semantic_dict_%dd.bin",
+                                  "models/semantic_dict_%dd.bin",
+                                  "semantic_dict_%dd.bin"};
 
     for (size_t i = 0; i < sizeof(bin_patterns) / sizeof(bin_patterns[0]); i++) {
         snprintf(path_buf, sizeof(path_buf), bin_patterns[i], dim);
@@ -362,13 +466,21 @@ static float *lookup_embedding(const char *part, int dim) {
 }
 
 static void compute_mean_pooled_vector(const char *word, int dim, float *out_vec) {
-    for (int d = 0; d < dim; d++) out_vec[d] = 0.0f;
+    for (int d = 0; d < dim; d++) {
+        out_vec[d] = 0.0f;
+    }
 
     char buf[128];
     to_lower_str(word, buf, sizeof(buf));
 
     int valid_parts = 0;
-    char *token = strtok(buf, "_");
+#ifdef _WIN32
+    char *next_token = NULL;
+    char *token = strtok_s(buf, "_", &next_token);
+#else
+    char *saveptr = NULL;
+    char *token = strtok_r(buf, "_", &saveptr);
+#endif
     while (token) {
         float *vec = lookup_embedding(token, dim);
         if (vec) {
@@ -377,7 +489,11 @@ static void compute_mean_pooled_vector(const char *word, int dim, float *out_vec
             }
             valid_parts++;
         }
-        token = strtok(NULL, "_");
+#ifdef _WIN32
+        token = strtok_s(NULL, "_", &next_token);
+#else
+        token = strtok_r(NULL, "_", &saveptr);
+#endif
     }
 
     if (valid_parts > 0) {
@@ -398,29 +514,42 @@ static double cosine_similarity(const float *a, const float *b, int dim) {
     }
     norm_a = sqrt(norm_a);
     norm_b = sqrt(norm_b);
-    if (norm_a <= 1e-12 || norm_b <= 1e-12) return 0.0;
+    if (norm_a <= 1e-12 || norm_b <= 1e-12) {
+        return 0.0;
+    }
     return dot / (norm_a * norm_b);
 }
 
-const char *semantic_correction(const char *word, const char **dictionary, size_t dict_size, int dim, double cutoff) {
-    if (!word || !dictionary || dict_size == 0 || dim <= 0) return word;
+const char *semantic_correction(const char *word, const char **dictionary,
+                                size_t dict_size, int dim, double cutoff) {
+    if (!word || !dictionary || dict_size == 0 || dim <= 0) {
+        return word;
+    }
 
-    /* Ensure embeddings are loaded for this dimension */
+    /* Ensure embeddings are loaded for this dimension under lock */
+    lock_cache();
     ensure_semantic_cache(dim);
 
     if (g_semantic_cache.entries == NULL || g_semantic_cache.dim != dim) {
+        unlock_cache();
         /* No semantic embedding loaded; safe fallback returning word */
         return word;
     }
 
     float *word_vec = (float *)malloc(sizeof(float) * dim);
-    if (!word_vec) return word;
+    if (!word_vec) {
+        unlock_cache();
+        return word;
+    }
     compute_mean_pooled_vector(word, dim, word_vec);
 
     double word_norm = 0.0;
-    for (int d = 0; d < dim; d++) word_norm += word_vec[d] * word_vec[d];
+    for (int d = 0; d < dim; d++) {
+        word_norm += word_vec[d] * word_vec[d];
+    }
     if (word_norm <= 1e-12) {
         free(word_vec);
+        unlock_cache();
         return word;
     }
 
@@ -429,12 +558,15 @@ const char *semantic_correction(const char *word, const char **dictionary, size_
     float *target_vec = (float *)malloc(sizeof(float) * dim);
     if (!target_vec) {
         free(word_vec);
+        unlock_cache();
         return word;
     }
 
     for (size_t i = 0; i < dict_size; i++) {
         const char *target = dictionary[i];
-        if (!target) continue;
+        if (!target) {
+            continue;
+        }
 
         compute_mean_pooled_vector(target, dim, target_vec);
         double score = cosine_similarity(word_vec, target_vec, dim);
@@ -446,6 +578,7 @@ const char *semantic_correction(const char *word, const char **dictionary, size_
 
     free(target_vec);
     free(word_vec);
+    unlock_cache();
     return best_match;
 }
 
@@ -453,15 +586,12 @@ const char *semantic_correction(const char *word, const char **dictionary, size_
 /* Pipeline & Chaining                                                        */
 /* -------------------------------------------------------------------------- */
 
-const char *apply_correction(
-    const char *word,
-    const char **dictionary,
-    size_t dict_size,
-    const char *strategy,
-    int dim,
-    double threshold
-) {
-    if (!strategy) return word;
+const char *apply_correction(const char *word, const char **dictionary,
+                             size_t dict_size, const char *strategy, int dim,
+                             double threshold) {
+    if (!strategy) {
+        return word;
+    }
     if (strcmp(strategy, "typo") == 0) {
         return typo_correction(word, dictionary, dict_size);
     } else if (strcmp(strategy, "ngram") == 0) {
@@ -472,15 +602,11 @@ const char *apply_correction(
     return word;
 }
 
-void correct_identifiers(
-    TokenStream *stream,
-    const char **dictionary,
-    size_t dict_size,
-    const char *strategy,
-    int dim,
-    double threshold
-) {
-    if (!stream || !dictionary || dict_size == 0) return;
+void correct_identifiers(TokenStream *stream, const char **dictionary, size_t dict_size,
+                         const char *strategy, int dim, double threshold) {
+    if (!stream || !dictionary || dict_size == 0) {
+        return;
+    }
 
     /* Parse comma-separated strategies */
     char strat_buf[256];
@@ -496,7 +622,9 @@ void correct_identifiers(
     char *token = strtok(strat_buf, ",");
     while (token && strat_count < 8) {
         /* trim leading whitespace */
-        while (*token && isspace((unsigned char)*token)) token++;
+        while (*token && isspace((unsigned char)*token)) {
+            token++;
+        }
         /* trim trailing whitespace */
         char *end = token + strlen(token) - 1;
         while (end > token && isspace((unsigned char)*end)) {
@@ -511,7 +639,9 @@ void correct_identifiers(
 
     for (size_t i = 0; i < stream->count; i++) {
         SqlToken *tok = &stream->tokens[i];
-        if (tok->type != TOKEN_IDENTIFIER) continue;
+        if (tok->type != TOKEN_IDENTIFIER) {
+            continue;
+        }
 
         char check_name[128];
         to_lower_str(tok->text, check_name, sizeof(check_name));
@@ -519,11 +649,73 @@ void correct_identifiers(
         const char *corrected_name = check_name;
         for (size_t s = 0; s < strat_count; s++) {
             const char *new_name = apply_correction(
-                corrected_name, dictionary, dict_size, strats[s], dim, threshold
-            );
+                corrected_name, dictionary, dict_size, strats[s], dim, threshold);
             if (strcmp(new_name, corrected_name) != 0) {
                 corrected_name = new_name;
                 break;
+            }
+        }
+
+        if (strcmp(corrected_name, check_name) != 0) {
+            char final_buf[128];
+            if (tok->is_all_upper) {
+                to_upper_str(corrected_name, final_buf, sizeof(final_buf));
+            } else {
+                strncpy(final_buf, corrected_name, sizeof(final_buf) - 1);
+                final_buf[sizeof(final_buf) - 1] = '\0';
+            }
+            free(tok->text);
+            size_t flen = strlen(final_buf);
+            tok->text = (char *)malloc(flen + 1);
+            memcpy(tok->text, final_buf, flen + 1);
+        }
+    }
+}
+
+void correct_identifiers_by_level(TokenStream *stream, const char **dictionary,
+                                  size_t dict_size, PostprocessLevel level, int dim,
+                                  double threshold) {
+    if (!stream || !dictionary || dict_size == 0 || level < POSTPROCESS_LEVEL_TYPO) {
+        return;
+    }
+
+    for (size_t i = 0; i < stream->count; i++) {
+        SqlToken *tok = &stream->tokens[i];
+        if (tok->type != TOKEN_IDENTIFIER) {
+            continue;
+        }
+
+        char check_name[128];
+        to_lower_str(tok->text, check_name, sizeof(check_name));
+
+        const char *corrected_name = check_name;
+
+        /* Stage 2: Typo correction (Level >= 2) */
+        if (level >= POSTPROCESS_LEVEL_TYPO) {
+            const char *new_name =
+                typo_correction(corrected_name, dictionary, dict_size);
+            if (strcmp(new_name, corrected_name) != 0) {
+                corrected_name = new_name;
+            }
+        }
+
+        /* Stage 3: N-gram correction (Level >= 3) if typo didn't match */
+        if (strcmp(corrected_name, check_name) == 0 &&
+            level >= POSTPROCESS_LEVEL_NGRAM) {
+            const char *new_name =
+                ngram_correction(corrected_name, dictionary, dict_size, 2, 0.3);
+            if (strcmp(new_name, corrected_name) != 0) {
+                corrected_name = new_name;
+            }
+        }
+
+        /* Stage 4: Semantic correction (Level >= 4) if ngram didn't match */
+        if (strcmp(corrected_name, check_name) == 0 &&
+            level >= POSTPROCESS_LEVEL_SEMANTIC) {
+            const char *new_name = semantic_correction(corrected_name, dictionary,
+                                                       dict_size, dim, threshold);
+            if (strcmp(new_name, corrected_name) != 0) {
+                corrected_name = new_name;
             }
         }
 

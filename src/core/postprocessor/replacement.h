@@ -7,6 +7,7 @@
 #define POSTPROCESSOR_REPLACEMENT_H
 
 #include <stddef.h>
+#include "core.h"
 #include "parser.h"
 
 #ifdef __cplusplus
@@ -21,27 +22,42 @@ double difflib_similarity(const char *a, const char *b);
 /**
  * @brief Typo correction matching Python's typo_correction (cutoff >= 0.7).
  */
-const char *typo_correction(const char *word, const char **dictionary, size_t dict_size);
+const char *typo_correction(const char *word, const char **dictionary,
+                            size_t dict_size);
 
 /**
  * @brief N-gram Jaccard similarity correction matching Python's ngram_correction.
  */
-const char *ngram_correction(const char *word, const char **dictionary, size_t dict_size, int n, double cutoff);
+const char *ngram_correction(const char *word, const char **dictionary,
+                             size_t dict_size, int n, double cutoff);
 
 /**
  * @brief Semantic correction using word embeddings.
  */
-const char *semantic_correction(const char *word, const char **dictionary, size_t dict_size, int dim, double cutoff);
+const char *semantic_correction(const char *word, const char **dictionary,
+                                size_t dict_size, int dim, double cutoff);
 
 /**
  * @brief Route single strategy correction for a word.
  */
-const char *apply_correction(const char *word, const char **dictionary, size_t dict_size, const char *strategy, int dim, double threshold);
+const char *apply_correction(const char *word, const char **dictionary,
+                             size_t dict_size, const char *strategy, int dim,
+                             double threshold);
 
 /**
- * @brief Correct identifiers in-place within a token stream according to comma-separated strategies.
+ * @brief Correct identifiers in-place within a token stream according to
+ * comma-separated strategies.
  */
-void correct_identifiers(TokenStream *stream, const char **dictionary, size_t dict_size, const char *strategy, int dim, double threshold);
+void correct_identifiers(TokenStream *stream, const char **dictionary, size_t dict_size,
+                         const char *strategy, int dim, double threshold);
+
+/**
+ * @brief Correct identifiers in-place within a token stream using cascading stage
+ * level.
+ */
+void correct_identifiers_by_level(TokenStream *stream, const char **dictionary,
+                                  size_t dict_size, PostprocessLevel level, int dim,
+                                  double threshold);
 
 void set_semantic_embedding_path(const char *path);
 

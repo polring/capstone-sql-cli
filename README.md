@@ -88,23 +88,37 @@ ctest --test-dir build -C Release --output-on-failure
 
 ---
 
+### 3) C 공유 라이브러리(`sql_engine.dll`) 및 C# 바인딩 빌드
+GUI 연동을 위한 C 네이티브 공유 라이브러리 및 .NET 8 P/Invoke 바인딩 프로젝트를 빌드합니다:
+
+```bash
+# 1. C 공유 라이브러리(sql_engine.dll / libsql_engine.so) 빌드
+cmake -B build -DSQL_BUILD_SHARED=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build build --target sql_engine --config Release
+
+# 2. C# P/Invoke 바인딩 레이어(SqlEngine.Core) 컴파일
+dotnet build src/bindings/SqlEngine.Core
+```
+
+---
+
 ## 4. 실행 방법
 
 ### 1) 모델, DB 및 임베딩 사전 가져오기 (Fetch)
-`scripts/fetch-assets` 스크립트를 통해 필요한 구성 요소만 선택적으로 다운로드하거나 전체를 일괄 업데이트할 수 있습니다:
+`scripts/fetch-assets` (또는 `scripts/fetch-asset`) 스크립트를 통해 GitHub Release에서 필요한 자산을 자동으로 가져옵니다:
 
 ```bash
-# 전체 일괄 업데이트 (모델 + DB + 임베딩 .bin 일괄 다운로드, 기본값)
-scripts/fetch-assets stage1-contract2-rc1 all
+# [최신 버전 일괄 자동 다운로드] 인자 없이 실행 시 최신 Release 태그 자동 감지 및 일괄 다운로드
+scripts/fetch-assets
 
-# 모델 가중치만 가져오기 (model.gguf, model_info.json, SHA256SUMS)
-scripts/fetch-assets stage1-contract2-rc1 model
+# 또는 특정 구성 요소만 최신 버전으로 가져오기
+scripts/fetch-assets model          # 최신 버전 모델만 가져오기
+scripts/fetch-assets db             # 최신 버전 shop.db만 가져오기
+scripts/fetch-assets embedding      # 최신 버전 semantic_dict_300d.bin만 가져오기
 
-# SQLite 스키마 DB만 가져오기 (shop.db)
-scripts/fetch-assets stage1-contract2-rc1 db
-
-# 후처리기 유사도 임베딩 사전만 가져오기 (semantic_dict_300d.bin)
-scripts/fetch-assets stage1-contract2-rc1 embedding
+# 특정 버전 태그를 직접 지정하여 가져오기
+scripts/fetch-assets stage1-contract2 all
+scripts/fetch-assets stage1-contract2 model
 ```
 
 ### 2) CLI 실행 방법
@@ -112,10 +126,11 @@ scripts/fetch-assets stage1-contract2-rc1 embedding
 자세한 모든 옵션 및 파라미터는 [docs/CLI_USAGE.md](docs/CLI_USAGE.md)를 참고하세요.
 
 ```bash
-# [추천 1] 대화형 REPL 쉘 실행 (인자 없이 실행 시 assets/ 내 모델, DB, 임베딩 자동 감지 및 로드)
+# [추천 1] 대화형 REPL 쉘 실행 (인자 없이 실행 시 assets/ 내 가장 최신 버전 번들 자동 감지 및 로드)
+# * 자동 감지 우선순위: 1) stage 높은 순 -> 2) contract 높은 순 -> 3) 딱 맞는 이름(contract<N>) 우선
 ./build/sql-cli -i
 # 또는 특정 모델 지정하여 실행:
-# ./build/sql-cli assets/stage1-contract2-rc1/model.gguf -i
+# ./build/sql-cli assets/stage1-contract2/model.gguf -i
 
 # * 대화형 쉘 내 주요 명령어:
 #   /ls                           : 선택 가능한 모델(*.gguf), DB(*.db), 임베딩(*.bin) 목록 확인
@@ -132,11 +147,23 @@ scripts/fetch-assets stage1-contract2-rc1 embedding
   --strategy typo,ngram \
   --max-tokens 64
 
-# [단독 후처리] 모델 없이 SQL 오타 직접 교정
-./build/sql-cli --postprocess "SELETC ctiy FRMO costumers" --db assets/stage1-contract2-rc1/shop.db
+# [JSON 파일 일괄 입출력] input.json(question 목록) -> output.json(question, sql 목록) 일괄 처리
+./build/sql-cli assets/stage1-contract2-rc1/model.gguf \
+  --json input.json output.json \
+  --strategy typo,ngram \
+  --db assets/stage1-contract2-rc1/shop.db \
+  --max-tokens 64
 
-# 순수 모델 추론: 질문 -> 날것의 SQL 생성 (stderr에 종료 이유 출력)
-./build/sql-cli assets/stage1-contract2-rc1/model.gguf --generate "what city does ashley live in?" 64
+# [단독 후처리] 모델 없이 SQL 오타 직접 교정 (5단계 계단식 전략: none -> keyword -> typo -> ngram -> semantic)
+./build/sql-cli --postprocess "SELETC ctiy FRMO costumers" \
+  --strategy typo \
+  --db assets/stage1-contract2-rc1/shop.db
+
+# 순수 모델 추론: 질문 -> 날것의 SQL 생성 (Stage 0: none 적용과 동일)
+./build/sql-cli assets/stage1-contract2-rc1/model.gguf \
+  --query "what city does ashley live in?" \
+  --strategy none \
+  --max-tokens 64
 
 # 텍스트 BPE 토큰화 (토큰 ID 출력)
 ./build/sql-cli assets/stage1-contract2-rc1/model.gguf --encode "SELECT stock FROM items;"

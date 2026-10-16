@@ -19,10 +19,10 @@ typedef enum {
     TOKEN_NUMBER,
     TOKEN_SYMBOL,
     TOKEN_WHITESPACE
-} TokenType;
+} SqlTokenType;
 
 typedef struct {
-    TokenType type;
+    SqlTokenType type;
     char *text;
     int is_all_upper;
 } SqlToken;

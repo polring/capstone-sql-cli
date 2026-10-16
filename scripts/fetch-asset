@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Wrapper forwarding to scripts/fetch-assets
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec "$SCRIPT_DIR/fetch-assets" "$@"
