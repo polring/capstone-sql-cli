@@ -6,6 +6,17 @@ on:
   pull_request:
 
 jobs:
+  asset-download:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test asset downloads without network access
+        run: bash tests/test_fetch_assets.sh
+
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 10

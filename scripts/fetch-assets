@@ -122,41 +122,93 @@ fi
 
 mkdir -p "$output"
 
+cleanup_downloads() {
+    rm -f "$download_directory/SHA256SUMS" "$download_directory/selected.sha256" \
+        "$download_directory/model.gguf" "$download_directory/model_info.json" \
+        "$download_directory/shop.db" "$download_directory/semantic_dict_300d.bin"
+    rmdir "$download_directory"
+}
+
+download_release_file() {
+    local filename="$1"
+    if ! curl -fsSL -o "$download_directory/$filename" \
+        "https://github.com/$REPOSITORY/releases/download/$tag/$filename"; then
+        echo "Error: Failed to download $filename from release '$tag'." >&2
+        exit 1
+    fi
+}
+
+has_checksum_entry() {
+    local filename="$1"
+    awk -v filename="$filename" '
+        { sub(/\r$/, "") }
+        $2 == filename || $2 == "*" filename { found = 1 }
+        END { exit !found }
+    ' "$download_directory/SHA256SUMS"
+}
+
+download_verified_file() {
+    local filename="$1"
+    # Check only this download: other release files may be absent or stale locally.
+    if ! awk -v filename="$filename" '
+        { sub(/\r$/, "") }
+        $2 == filename || $2 == "*" filename { print; count++ }
+        END { exit (count != 1) }
+    ' "$download_directory/SHA256SUMS" > "$download_directory/selected.sha256"; then
+        echo "Error: Expected one checksum entry for $filename in SHA256SUMS." >&2
+        exit 1
+    fi
+
+    download_release_file "$filename"
+    if ! (
+        cd "$download_directory"
+        if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum -c selected.sha256
+        else
+            shasum -a 256 -c selected.sha256
+        fi
+    ); then
+        echo "Error: Checksum verification failed for $filename." >&2
+        exit 1
+    fi
+
+    # A failed download or checksum must not replace an existing local file.
+    mv -f "$download_directory/$filename" "$output/$filename"
+}
+
 fetch_model() {
     echo "==> Fetching Model ($tag)..."
-    for file in model.gguf model_info.json SHA256SUMS; do
-        curl -fsSL -o "$output/$file" \
-            "https://github.com/$REPOSITORY/releases/download/$tag/$file"
-    done
-    (
-        cd "$output"
-        if command -v sha256sum >/dev/null; then
-            sha256sum --ignore-missing -c SHA256SUMS 2>/dev/null || sha256sum -c SHA256SUMS
-        else
-            shasum -a 256 -c SHA256SUMS
-        fi
-    )
+    download_verified_file model.gguf
+    download_verified_file model_info.json
     echo "Model saved to $output"
 }
 
 fetch_db() {
     echo "==> Fetching Database ($tag)..."
-    curl -fsSL -o "$output/shop.db" \
-        "https://github.com/$REPOSITORY/releases/download/$tag/shop.db"
+    download_verified_file shop.db
     echo "Database saved to $output/shop.db"
 }
 
 fetch_embedding() {
     echo "==> Fetching Semantic Embedding Dictionary ($tag)..."
-    EMB_FILE="semantic_dict_300d.bin"
-    echo "Downloading $EMB_FILE from release into $output..."
-    if curl -fsSL -o "$output/$EMB_FILE" \
-        "https://github.com/$REPOSITORY/releases/download/$tag/$EMB_FILE"; then
-        echo "Successfully fetched $EMB_FILE into $output"
-    else
-        echo "Warning: $EMB_FILE is not available in release '$tag'."
+    local filename="semantic_dict_300d.bin"
+    # Older bundles may omit the dictionary; only an all-target fetch may skip it.
+    if [[ "$target" == "all" ]] && ! has_checksum_entry "$filename"; then
+        echo "Warning: $filename is not listed in release '$tag'; skipping embedding." >&2
+        return
     fi
+    download_verified_file "$filename"
+    echo "Embedding saved to $output/$filename"
 }
+
+if ! command -v sha256sum >/dev/null 2>&1 && ! command -v shasum >/dev/null 2>&1; then
+    echo "Error: Install sha256sum or shasum to verify release files." >&2
+    exit 1
+fi
+
+download_directory=$(mktemp -d "$output/.fetch-assets.XXXXXX")
+trap cleanup_downloads EXIT
+download_release_file SHA256SUMS
 
 case "$target" in
     all)
@@ -178,4 +230,5 @@ case "$target" in
         ;;
 esac
 
+mv -f "$download_directory/SHA256SUMS" "$output/SHA256SUMS"
 echo "Done. Target '$target' fetched successfully to $output."
