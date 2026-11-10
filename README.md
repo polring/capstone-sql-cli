@@ -11,7 +11,7 @@
 | C 추론기 빌드 | Visual Studio의 **C++를 사용한 데스크톱 개발** 워크로드 및 CMake 도구 | Xcode Command Line Tools의 Apple Clang, CMake 3.16 이상 |
 | 실행 시 사용하는 추론 라이브러리 | `sql_engine.dll` | `libsql_engine.dylib` |
 
-아래 명령은 모두 `SqlApp.sln`이 있는 **저장소 루트**에서 실행합니다. [Windows 빌드, 실행 및 배포](#3-windows-빌드-실행-및-배포) · [macOS 빌드, 실행 및 배포](#4-macos-빌드-실행-및-배포)
+아래 명령은 모두 `SqlApp.sln`이 있는 **저장소 루트**에서 실행합니다. [Windows 빌드, 실행 및 배포](#3-windows-빌드-실행-및-배포) · [macOS 빌드 및 실행](#4-macos-빌드-및-실행)
 
 ## 1. 프로젝트 구조
 
@@ -61,36 +61,37 @@ bash scripts/fetch-asset
 bash scripts/fetch-asset stage2-contract2
 ```
 
-**최신 호환 릴리스를 지정한 폴더에 받기 · Windows와 macOS 공통**
-
-```
-bash scripts/fetch-asset latest "./내 모델"
-```
-
 ---
 
 ## 3. Windows 빌드, 실행 및 배포
 
 ### 1) 빌드 — Developer Command Prompt for Visual Studio
 
-x64 C 추론기를 Release로 빌드합니다. 생성되는 라이브러리는 `app/runtimes/win-x64/native/sql_engine.dll`입니다.
+중단점에서 멈춰 변수 값을 확인하려면 Debug를, 배포용으로 최적화하려면 Release를 선택하세요. Developer Command Prompt에서는 원하는 구성의 `#` 설명 줄 아래에 있는 명령 세 줄만 복사해 저장소 루트에서 실행하세요.
 
 ```
+# 디버그 빌드
 cmake -S native -B build -A x64
-cmake --build build --config Release
-```
+cmake --build build --config Debug --clean-first
+dotnet build app/SqlApp.csproj -f net10.0-windows10.0.26100 -c Debug
 
-이어서 WinUI 3 앱을 빌드합니다.
-
-```
+# 또는 릴리즈 빌드
+cmake -S native -B build -A x64
+cmake --build build --config Release --clean-first
 dotnet build app/SqlApp.csproj -f net10.0-windows10.0.26100 -c Release
 ```
 
+두 구성 모두 추론기 DLL을 `app/runtimes/win-x64/native/sql_engine.dll`에 복사합니다. `--clean-first`로 다시 빌드하면 구성을 바꿔도 앱에 해당 구성의 DLL이 포함됩니다.
+
 ### 2) 실행 — 빌드한 GUI 열기
 
-저장소 루트에서 Release 실행 파일을 엽니다.
+저장소 루트에서 빌드한 구성에 맞는 명령 하나를 실행하세요.
 
 ```
+# 디버그 빌드 실행
+.\app\bin\Debug\net10.0-windows10.0.26100\SqlApp.exe
+
+# 또는 릴리즈 빌드 실행
 .\app\bin\Release\net10.0-windows10.0.26100\SqlApp.exe
 ```
 
@@ -98,7 +99,7 @@ dotnet build app/SqlApp.csproj -f net10.0-windows10.0.26100 -c Release
 
 ### 3) 배포 — Windows x64 ZIP 만들기
 
-.NET 런타임을 포함한 게시 폴더를 만듭니다.
+위의 릴리즈 빌드를 마친 뒤 .NET 런타임을 포함한 게시 폴더를 만듭니다.
 
 ```
 dotnet publish app/SqlApp.csproj -f net10.0-windows10.0.26100 -c Release -r win-x64 --self-contained -o build/publish/win-x64
@@ -114,7 +115,7 @@ tar.exe -a -cf build\SqlApp-win-x64.zip -C build\publish\win-x64 .
 
 ---
 
-## 4. macOS 빌드, 실행 및 배포
+## 4. macOS 빌드 및 실행
 
 ### 1) 빌드 — macOS 터미널
 
@@ -152,43 +153,13 @@ dotnet run --project app/SqlApp.csproj -f net10.0-desktop -c Release --no-build 
 
 새 대화에서 영어 질문을 보내면 자동 선택된 모델이 생성한 SQL이 표시됩니다. **에셋 폴더** 목록이나 **폴더 탐색**에서 폴더를 바꾸면 모델과 DB가 함께 전환됩니다.
 
-### 3) 배포 — 앱 번들 확인 및 DMG 만들기
-
-1단계에서 빌드한 아키텍처에 맞춰 앱 번들을 게시합니다. 아래 예시는 Apple Silicon용입니다. Intel용은 첫 줄을 `rid=osx-x64`로 바꾸세요.
-
-```
-rid=osx-arm64
-dotnet publish app/SqlApp.csproj -f net10.0-desktop -c Release -r "$rid" --self-contained -p:PackageFormat=app
-```
-
-같은 터미널에서 게시한 앱을 열고 모델이 로드되는지 확인합니다.
-
-```
-open "app/bin/Release/net10.0-desktop/$rid/publish/SqlApp.app"
-```
-
-같은 터미널에서 아래 두 값을 배포자의 인증서 이름과 `notarytool` 키체인 프로필로 바꿔 입력합니다.
-
-```
-identity="Developer ID Application: 이름 (팀 ID)"
-profile="공증 프로필 이름"
-```
-
-배포용 DMG를 만들고 서명과 공증을 진행합니다.
-
-```
-dotnet publish app/SqlApp.csproj -f net10.0-desktop -c Release -r "$rid" --self-contained \
-  -p:PackageFormat=dmg -p:CodesignKey="$identity" -p:DiskImageSigningKey="$identity" \
-  -p:UnoMacOSNotarizeKeychainProfile="$profile"
-```
-
-**배포 파일**은 `app/bin/Release/net10.0-desktop/<RID>/publish/SqlApp.dmg`입니다. 받는 사람은 자신의 Mac CPU에 맞는 DMG를 열어 `SqlApp.app`을 응용 프로그램 폴더로 복사한 뒤 실행합니다. 앱에서 사용할 모델과 DB는 2절에서 받을 수 있습니다. [인증서 확인 및 공증 프로필 등록 방법](https://platform.uno/docs/articles/uno-publishing-desktop-macos.html#notarize-the-disk-image)
-
 ## 5. 테스트 실행
 
 빌드가 끝나면 CTest로 네 가지 fixture 세트의 추론 결과와 오류 후 복구를 검증합니다.
 
 **Windows · Developer Command Prompt for Visual Studio**
+
+Debug로 빌드했다면 아래 명령에서 `-C Release`를 `-C Debug`로 바꾸세요.
 
 ```
 cmake -E chdir build ctest -C Release --output-on-failure

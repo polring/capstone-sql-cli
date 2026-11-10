@@ -1,6 +1,6 @@
 # GUI 코드 안내
 
-`SqlApp.csproj`는 Windows WinUI와 Uno 데스크톱 앱의 공통 프로젝트입니다. 저장소 루트에서 네이티브 엔진을 먼저 빌드하고, 해당 운영체제의 절차에 따라 GUI를 실행하거나 게시합니다. [Windows 빌드·실행·배포](../README.md#3-windows-빌드-실행-및-배포) · [macOS 빌드·실행·배포](../README.md#4-macos-빌드-실행-및-배포)
+`SqlApp.csproj`는 Windows WinUI와 Uno 데스크톱 앱의 공통 프로젝트입니다. 저장소 루트에서 네이티브 엔진을 먼저 빌드한 뒤 운영체제에 맞는 GUI를 실행합니다. [Windows 빌드·실행·배포](../README.md#3-windows-빌드-실행-및-배포) · [macOS 빌드·실행](../README.md#4-macos-빌드-및-실행)
 
 ## 질문에서 조회 결과까지
 
