@@ -1,18 +1,20 @@
-# Wrapper Makefile delegating to CMake as the single source of truth
+# Native engine and contract tests. The GUI is built with dotnet.
 BUILD_DIR ?= build
 CONFIG ?= Release
 
-.PHONY: all engine test clean
+.PHONY: all configure engine test clean
 
-all:
-	cmake -B $(BUILD_DIR) -DCMAKE_BUILD_TYPE=$(CONFIG)
-	cmake --build $(BUILD_DIR) --config $(CONFIG)
+all: configure
+	cmake --build "$(BUILD_DIR)" --config "$(CONFIG)"
 
-engine: all
+configure:
+	cmake -S native -B "$(BUILD_DIR)" -DCMAKE_BUILD_TYPE="$(CONFIG)"
+
+engine: configure
+	cmake --build "$(BUILD_DIR)" --config "$(CONFIG)" --target sql_engine
 
 test: all
-	ctest --test-dir $(BUILD_DIR) -C $(CONFIG) --output-on-failure
+	cmake -E chdir "$(BUILD_DIR)" ctest -C "$(CONFIG)" --output-on-failure
 
 clean:
-	cmake --build $(BUILD_DIR) --target clean 2>/dev/null || true
-	rm -rf $(BUILD_DIR)
+	@if [ -f "$(BUILD_DIR)/CMakeCache.txt" ]; then cmake --build "$(BUILD_DIR)" --config "$(CONFIG)" --target clean; fi

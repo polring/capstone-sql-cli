@@ -1,24 +1,31 @@
 name: tests
-
 on:
   push:
     branches: [main]
   pull_request:
 
 jobs:
-  test:
+  native:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+      - run: cmake -S native -B build -DCMAKE_BUILD_TYPE=Release
+      - run: cmake --build build --config Release
+      - run: cmake -E chdir build ctest -C Release --output-on-failure
+      - run: clang-format --dry-run --Werror native/sql_engine/*.c native/sql_engine/*.h native/sql_engine/tests/*.c
 
-      - name: Build with CMake
+  gui:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - run: cmake -S native -B build -A x64
+      - run: cmake --build build --config Release
+      - run: cmake -E chdir build ctest -C Release --output-on-failure
+      - run: dotnet build SqlApp.sln -c Release
+      - run: dotnet publish app -f net10.0-desktop -c Release -r win-x64 -o build/publish
+      - shell: pwsh
         run: |
-          cmake -B build -DCMAKE_BUILD_TYPE=Release
-          cmake --build build --config Release
-
-      - name: Run tests with CTest
-        run: ctest --test-dir build -C Release --output-on-failure
-
-      - name: Check engine formatting
-        run: clang-format --dry-run --Werror src/core/engine/loader.c src/cli/main.c tests/fixture_test.c tests/error_test.c
+          if (!(Test-Path build/publish/sql_engine.dll)) { throw 'Missing sql_engine.dll' }

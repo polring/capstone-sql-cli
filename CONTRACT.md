@@ -7,7 +7,7 @@
 
 ## 1. 버전 규칙
 
-- 버전은 exporter의 `CONTRACT_VERSION`(`src/tokenizer/contract.py`)과 엔진의 `CONTRACT_VERSION`(`engine/loader.c`)이
+- 버전은 exporter의 `CONTRACT_VERSION`(`src/tokenizer/contract.py`)과 엔진의 `CONTRACT_VERSION`(`native/sql_engine/sql_engine.c`)이
   같은 값이어야 한다. 엔진은 지원하지 않는 버전의 파일을 오류로 거부한다.
 - **버전을 올리는 경우**: 아래 2~6절 중 하나라도 바뀔 때. 예: RoPE 구현 변경, 정규화 위치 변경, 특수 토큰 추가,
   pre-tokenizer 규칙 변경, 위치 토큰 도입, 메타데이터 키나 텐서 이름 변경.
@@ -106,7 +106,7 @@ ID 배치: `0~255` 바이트, 특수 토큰(`pad_id`…`sep_id`), seed(`seed_bas
 [bos_id] encode(lowercase(question)) [sep_id]
 ```
 
-질문은 ASCII 소문자로 바꾼 뒤 4절로 인코딩한다. 이 길이가 `context`를 넘으면 오류다.
+GUI가 전달한 질문을 C 엔진이 ASCII 소문자로 바꾼 뒤 4절로 인코딩한다. 공개 API는 NUL로 종료되는 ASCII 문자열을 받는다. BOS와 SEP를 포함한 길이가 `context`를 넘으면 오류를 반환한다.
 
 ## 6. 디코딩
 
@@ -115,7 +115,7 @@ ID 배치: `0~255` 바이트, 특수 토큰(`pad_id`…`sep_id`), seed(`seed_bas
 - **동점**: `eos_id` 우선, 그다음 작은 ID.
 - **종료**: `eos_id`가 선택되면 `eos`, 생성 수가 `max_new_tokens`에 닿으면 `max_new_tokens`, 다음 forward 전에
   시퀀스가 `context`를 채우면 `context`.
-- 출력은 생성된 토큰의 바이트를 이어 붙인 것이다(`eos_id`는 포함하지 않음).
+- 출력은 생성된 토큰의 바이트를 이어 붙인 것이다(`eos_id`는 포함하지 않음). `sql_model_generate`는 바이트 버퍼, 바이트 길이, 종료 사유를 반환한다. 호출자는 길이를 기준으로 읽고 `sql_generation_free`로 결과를 해제한다.
 
 ## 7. fixture
 
@@ -139,6 +139,6 @@ logits    <token id ...>    <logit ...>                       # vocab_size 개
 generate  <max_new_tokens>    <question>    <output>    <eos | max_new_tokens | context>
 ```
 
-엔진은 `make test`에서 모든 세트와 비교한다. logits 허용 오차는 `atol = rtol = 2e-5`이고, 토큰 ID와 생성 바이트는
+네이티브 빌드 후 저장소 루트에서 `cmake -E chdir build ctest -C Release --output-on-failure`로 네 세트와 오류 복구 테스트를 실행한다. logits 허용 오차는 `atol = rtol = 2e-5`이고, 토큰 ID와 생성 바이트는
 정확히 같아야 한다. 학습 저장소는 같은 model.gguf로 기대값을 다시 계산해 커밋된 값과 비교하므로, 계산이 바뀌었는데
 버전을 올리지 않으면 그쪽 CI가 실패한다.
