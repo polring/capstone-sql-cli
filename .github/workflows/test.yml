@@ -25,6 +25,7 @@ jobs:
       - run: cmake --build build --config Release
       - run: cmake -E chdir build ctest -C Release --output-on-failure
       - run: dotnet build SqlApp.sln -c Release
+      - run: dotnet run --project tests/SqlApp.Tests -c Release
       - run: dotnet publish app -f net10.0-desktop -c Release -r win-x64 -o build/publish
       - shell: pwsh
         run: |

@@ -5,6 +5,7 @@
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
       xmlns:local="using:SqlApp"
       xmlns:models="using:SqlApp.Models"
+      xmlns:controls="using:SqlApp.Controls"
       xmlns:services="using:SqlApp.Services"
       xmlns:converters="using:SqlApp.Converters"
       Background="{ThemeResource ApplicationPageBackgroundThemeBrush}">
@@ -13,7 +14,6 @@
     <converters:BoolToVisibilityConverter x:Key="BoolToVisibilityConverter" />
     <converters:BoolToVisibilityConverter x:Key="InverseVisibilityConverter" Invert="True" />
     <converters:StringToFilenameConverter x:Key="FilenameConverter" />
-    <converters:ElapsedMsConverter x:Key="ElapsedMsConverter" />
     <converters:SafeIntConverter x:Key="SafeIntConverter" />
 
   </Page.Resources>
@@ -145,13 +145,18 @@
               BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
               BorderThickness="0,0,0,1" Padding="16,10">
         <Grid ColumnDefinitions="*,Auto">
-          <!-- Asset Bundle Selector & Badges (Scrollable horizontally to prevent forcing Column 1 width) -->
-          <ScrollViewer Grid.Column="0" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled">
-            <StackPanel Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
+          <ScrollViewer Grid.Column="0" HorizontalScrollMode="Enabled" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled">
+            <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+              <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                <RadioButton GroupName="ModelMode" Content="단일 모델" MinWidth="0"
+                             IsChecked="{x:Bind ViewModel.IsSingleMode, Mode=OneWay}" Click="SingleMode_Click" />
+                <RadioButton GroupName="ModelMode" Content="이중 모델" MinWidth="0"
+                             IsChecked="{x:Bind ViewModel.IsDualMode, Mode=OneWay}" Click="DualMode_Click" />
+              </StackPanel>
               <FontIcon Glyph="&#xF158;" FontSize="14" Foreground="{ThemeResource AccentFillColorDefaultBrush}" VerticalAlignment="Center" />
               <TextBlock Text="에셋 폴더" FontSize="12" FontWeight="SemiBold" VerticalAlignment="Center" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
               
-              <ComboBox MinWidth="180" ItemsSource="{x:Bind ViewModel.AvailableBundles}"
+              <ComboBox MinWidth="146" MaxWidth="245" ItemsSource="{x:Bind ViewModel.AvailableBundles}"
                         PlaceholderText="선택 가능한 폴더 없음"
                         AutomationProperties.Name="에셋 폴더"
                         SelectedItem="{x:Bind ViewModel.CurrentSessionBundle, Mode=OneWay}"
@@ -168,35 +173,44 @@
               </ComboBox>
 
               <Button Content="폴더 탐색" Click="BrowseAssetFolder_Click" CornerRadius="4"
-                      ToolTipService.ToolTip="GGUF 모델과 SQLite DB가 함께 있는 폴더 선택" />
+                      ToolTipService.ToolTip="현재 모드에 사용할 에셋 폴더 선택" />
 
-              <!-- Files in the selected asset folder -->
-              <StackPanel Orientation="Horizontal" Spacing="6" Margin="6,0,0,0" VerticalAlignment="Center">
-                <!-- GGUF File Badge -->
-                <Border Background="{ThemeResource SubtleFillColorSecondaryBrush}"
-                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1"
-                        CornerRadius="4" Padding="7,3" VerticalAlignment="Center"
-                        ToolTipService.ToolTip="{x:Bind ViewModel.SelectedModelPath, Mode=OneWay}">
-                  <StackPanel Orientation="Horizontal" Spacing="4" VerticalAlignment="Center">
-                    <TextBlock Text="GGUF:" FontSize="11" FontWeight="SemiBold" Foreground="{ThemeResource AccentFillColorDefaultBrush}" />
-                    <TextBlock Text="{x:Bind ViewModel.SelectedModelFileName, Mode=OneWay}" FontSize="11" Foreground="{ThemeResource TextFillColorPrimaryBrush}"
-                               MaxWidth="160" TextTrimming="CharacterEllipsis" />
-                  </StackPanel>
-                </Border>
+              <Border Background="{ThemeResource SubtleFillColorSecondaryBrush}"
+                      BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1"
+                      CornerRadius="4" Padding="7,0" MinHeight="28" VerticalAlignment="Center"
+                      ToolTipService.ToolTip="{x:Bind ViewModel.SelectedModelPath, Mode=OneWay}">
+                <StackPanel Orientation="Horizontal" Spacing="4" VerticalAlignment="Center">
+                  <TextBlock Text="GGUF:" FontSize="11" FontWeight="SemiBold" Foreground="{ThemeResource AccentFillColorDefaultBrush}" />
+                  <TextBlock Text="{x:Bind ViewModel.SelectedModelFileName, Mode=OneWay}" FontSize="11" Foreground="{ThemeResource TextFillColorPrimaryBrush}"
+                             MaxWidth="160" TextTrimming="CharacterEllipsis" />
+                </StackPanel>
+              </Border>
 
-                <!-- DB File Badge -->
-                <Border Background="{ThemeResource SubtleFillColorSecondaryBrush}"
-                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1"
-                        CornerRadius="4" Padding="7,3" VerticalAlignment="Center"
-                        ToolTipService.ToolTip="{x:Bind ViewModel.SelectedDbPath, Mode=OneWay}">
-                  <StackPanel Orientation="Horizontal" Spacing="4" VerticalAlignment="Center">
-                    <TextBlock Text="DB:" FontSize="11" FontWeight="SemiBold" Foreground="{ThemeResource AccentFillColorDefaultBrush}" />
-                    <TextBlock Text="{x:Bind ViewModel.SelectedDbFileName, Mode=OneWay}" FontSize="11" Foreground="{ThemeResource TextFillColorPrimaryBrush}"
-                               MaxWidth="160" TextTrimming="CharacterEllipsis" />
-                  </StackPanel>
-                </Border>
+              <Border Background="{ThemeResource SubtleFillColorSecondaryBrush}"
+                      BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1"
+                      CornerRadius="4" Padding="7,0" MinHeight="28" VerticalAlignment="Center"
+                      ToolTipService.ToolTip="{x:Bind ViewModel.SelectedDbPath, Mode=OneWay}">
+                <StackPanel Orientation="Horizontal" Spacing="4" VerticalAlignment="Center">
+                  <TextBlock Text="DB:" FontSize="11" FontWeight="SemiBold" Foreground="{ThemeResource AccentFillColorDefaultBrush}" />
+                  <TextBlock Text="{x:Bind ViewModel.SelectedDbFileName, Mode=OneWay}" FontSize="11" Foreground="{ThemeResource TextFillColorPrimaryBrush}"
+                             MaxWidth="160" TextTrimming="CharacterEllipsis" />
+                </StackPanel>
+              </Border>
 
-              </StackPanel>
+              <Border Background="{ThemeResource SubtleFillColorSecondaryBrush}"
+                      BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1"
+                      CornerRadius="4" Padding="7,0,3,0" VerticalAlignment="Center">
+                <StackPanel Orientation="Horizontal" Spacing="4" VerticalAlignment="Center">
+                  <TextBlock Text="Tokens:" FontSize="11" FontWeight="SemiBold" VerticalAlignment="Center"
+                             Foreground="{ThemeResource AccentFillColorDefaultBrush}" />
+                  <TextBox x:Name="TokensTextBox"
+                           Text="{x:Bind ViewModel.SelectedSession.MaxTokens, Mode=TwoWay, Converter={StaticResource SafeIntConverter}, ConverterParameter=64}"
+                           LostFocus="TokensTextBox_LostFocus" AutomationProperties.Name="최대 생성 토큰 수"
+                           ToolTipService.ToolTip="최대 생성 토큰 수" Width="46" MinWidth="0" MinHeight="26"
+                           Padding="2,0" FontSize="12" VerticalContentAlignment="Center" TextAlignment="Center"
+                           Background="Transparent" BorderThickness="0" CornerRadius="3" IsSpellCheckEnabled="False" />
+                </StackPanel>
+              </Border>
             </StackPanel>
           </ScrollViewer>
 
@@ -260,12 +274,14 @@
                 <StackPanel Spacing="6" HorizontalAlignment="Center">
                   <TextBlock Text="SQL AI Assistant" FontSize="20" FontWeight="SemiBold" HorizontalAlignment="Center" />
                   <TextBlock Text="영어로 질문하면 모델이 SQL을 생성합니다. 실행을 누르면 같은 에셋 폴더의 DB에서 결과를 조회합니다."
+                             Visibility="{x:Bind ViewModel.IsSingleMode, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}"
                              FontSize="13" Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                              HorizontalAlignment="Center" TextWrapping="Wrap" TextAlignment="Center" MaxWidth="750" />
                 </StackPanel>
 
                 <!-- Quick Suggestions (English) -->
-                <StackPanel Spacing="8" Margin="0,12,0,0" HorizontalAlignment="Center" Width="690">
+                <StackPanel Spacing="8" Margin="0,12,0,0" HorizontalAlignment="Center" Width="690"
+                            Visibility="{x:Bind ViewModel.IsSingleMode, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}">
                   <TextBlock Text="Recommended Prompt Examples" FontSize="11" FontWeight="SemiBold"
                              Foreground="{ThemeResource TextFillColorTertiaryBrush}" HorizontalAlignment="Center" />
                   <Button Command="{x:Bind ViewModel.UsePromptSuggestionCommand}"
@@ -324,10 +340,7 @@
                                 CornerRadius="18,18,18,4" Padding="20,16">
                           <StackPanel Spacing="12">
 
-                            <!-- Header: Model Label + Badges + Action Buttons -->
-                            <Grid ColumnDefinitions="Auto,*,Auto">
-                              <!-- Left Info Badges (Icon removed, 'Model' label) -->
-                              <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                            <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
                                 <TextBlock Text="Model" FontWeight="SemiBold" FontSize="14.5" VerticalAlignment="Center" />
 
                                 <!-- Thinking Progress Ring (답변 생성 대기 중) -->
@@ -337,41 +350,14 @@
 
                                 <!-- Elapsed Time Badge (생성 완료 후) -->
                                 <Border Background="{ThemeResource SubtleFillColorSecondaryBrush}" CornerRadius="4" Padding="7,3" VerticalAlignment="Center"
-                                        Visibility="{x:Bind HasSql, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}">
+                                        Visibility="{x:Bind HasInferenceTime, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}">
                                   <StackPanel Orientation="Horizontal" Spacing="4">
                                     <FontIcon Glyph="&#xE823;" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" VerticalAlignment="Center" />
-                                    <TextBlock Text="{x:Bind InferenceTimeMs, Mode=OneWay, Converter={StaticResource ElapsedMsConverter}}"
+                                    <TextBlock Text="{x:Bind InferenceTimeLabel, Mode=OneWay}"
                                                FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" VerticalAlignment="Center" />
                                   </StackPanel>
                                 </Border>
-
-
-                              </StackPanel>
-
-                              <!-- Right Action Buttons: Play (Run) + Copy -->
-                              <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center"
-                                          Visibility="{x:Bind HasSql, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}">
-                                <!-- Play (Run) Button -->
-                                <Button Click="RunSqlButton_Click"
-                                        CornerRadius="4" Padding="10,4" FontSize="12.5"
-                                        ToolTipService.ToolTip="SQLite DB에 즉시 실행">
-                                  <StackPanel Orientation="Horizontal" Spacing="5">
-                                    <FontIcon Glyph="&#xE768;" FontSize="11.5" VerticalAlignment="Center" />
-                                    <TextBlock Text="실행" FontWeight="SemiBold" FontSize="12.5" VerticalAlignment="Center" />
-                                  </StackPanel>
-                                </Button>
-
-                                <!-- Copy Button -->
-                                <Button Click="CopySqlButton_Click"
-                                        CornerRadius="4" Padding="10,4" FontSize="12.5"
-                                        ToolTipService.ToolTip="SQL 클립보드 복사">
-                                  <StackPanel Orientation="Horizontal" Spacing="5">
-                                    <FontIcon Glyph="&#xE8C8;" FontSize="11.5" VerticalAlignment="Center" />
-                                    <TextBlock Text="복사" FontSize="12.5" VerticalAlignment="Center" />
-                                  </StackPanel>
-                                </Button>
-                              </StackPanel>
-                            </Grid>
+                            </StackPanel>
 
                             <!-- Error Message if any -->
                             <Border Background="{ThemeResource SubtleFillColorSecondaryBrush}"
@@ -383,16 +369,61 @@
                                          FontSize="13.5" TextWrapping="Wrap" />
                             </Border>
 
-                            <!-- SQL Code Block -->
-                            <Border Background="{ThemeResource SolidBackgroundFillColorSecondaryBrush}"
-                                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1"
-                                    CornerRadius="8" Padding="16,14"
-                                    Visibility="{x:Bind HasSql, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}">
-                              <TextBlock Text="{x:Bind Sql, Mode=OneWay}"
-                                         IsTextSelectionEnabled="True"
-                                         FontFamily="Cascadia Code, Consolas, Courier New"
-                                         FontSize="15" Foreground="{ThemeResource AccentFillColorDefaultBrush}" TextWrapping="Wrap" />
-                            </Border>
+                            <TextBlock Text="{x:Bind GenerationWarning, Mode=OneWay}"
+                                       Visibility="{x:Bind HasGenerationWarning, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}"
+                                       Foreground="{ThemeResource SystemFillColorCautionBrush}"
+                                       FontWeight="SemiBold" FontSize="13.5" TextWrapping="Wrap" />
+
+                            <ItemsControl ItemsSource="{x:Bind SqlCandidates, Mode=OneWay}" HorizontalAlignment="Stretch"
+                                          Visibility="{x:Bind HasSqlCandidates, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}">
+                              <ItemsControl.ItemTemplate>
+                                <DataTemplate x:DataType="models:ChatSqlCandidate">
+                                  <StackPanel HorizontalAlignment="Stretch" Spacing="4" Margin="0,3">
+                                    <TextBlock Text="{x:Bind Label}" FontSize="12.5" FontWeight="SemiBold" TextWrapping="Wrap"
+                                               Visibility="{x:Bind HasLabel, Converter={StaticResource BoolToVisibilityConverter}}" />
+                                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="10">
+                                      <Border Background="{ThemeResource SolidBackgroundFillColorSecondaryBrush}"
+                                              BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1"
+                                              CornerRadius="8" Padding="14,10"
+                                              Visibility="{x:Bind HasSql, Converter={StaticResource BoolToVisibilityConverter}}">
+                                        <TextBlock Text="{x:Bind Sql}" TextWrapping="Wrap" VerticalAlignment="Center"
+                                                   FontFamily="Cascadia Code, Consolas, Courier New" FontSize="15"
+                                                   Foreground="{ThemeResource AccentFillColorDefaultBrush}" />
+                                      </Border>
+                                      <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                                        <Grid ToolTipService.ToolTip="{x:Bind ValidationLabel, Mode=OneWay}"
+                                              VerticalAlignment="Center"
+                                              AutomationProperties.Name="{x:Bind ValidationLabel, Mode=OneWay}">
+                                          <FontIcon Glyph="&#xE73E;" FontSize="15" Foreground="{ThemeResource SystemFillColorSuccessBrush}"
+                                                    Visibility="{x:Bind IsValidated, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}" />
+                                          <FontIcon Glyph="&#xE711;" FontSize="15" Foreground="{ThemeResource SystemFillColorCriticalBrush}"
+                                                    Visibility="{x:Bind HasValidationError, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}" />
+                                          <FontIcon Glyph="&#xE823;" FontSize="14" Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                                    Visibility="{x:Bind IsChecking, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}" />
+                                        </Grid>
+                                        <Button Click="RunSqlButton_Click" IsEnabled="{x:Bind CanExecuteSql, Mode=OneWay}"
+                                                CornerRadius="4" Padding="10,4" FontSize="12.5" Content="▶"
+                                                ToolTipService.ToolTip="이 SQL 실행" AutomationProperties.Name="이 SQL 실행" />
+                                      </StackPanel>
+                                    </Grid>
+                                    <TextBlock Text="{x:Bind ValidationError, Mode=OneWay}" TextWrapping="Wrap" IsTextSelectionEnabled="True"
+                                               Foreground="{ThemeResource SystemFillColorCriticalBrush}" FontSize="13"
+                                               Visibility="{x:Bind HasValidationError, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}" />
+                                  </StackPanel>
+                                </DataTemplate>
+                              </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+
+                            <StackPanel Spacing="8"
+                                        Visibility="{x:Bind HasPipelineRun, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}">
+                              <TextBlock Text="{x:Bind PipelineOutput, Mode=OneWay}" IsTextSelectionEnabled="True"
+                                         FontFamily="Cascadia Code, Consolas, Courier New" TextWrapping="Wrap"
+                                         Visibility="{x:Bind ShowPipelineOutput, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}" />
+                              <Expander Header="단계별 입력·출력" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
+                                <TextBlock Text="{x:Bind StageDetails, Mode=OneWay}" IsTextSelectionEnabled="True" TextWrapping="Wrap"
+                                           FontSize="13" />
+                              </Expander>
+                            </StackPanel>
 
                             <!-- Running Query Indicator -->
                             <ProgressBar IsIndeterminate="True" Height="2"
@@ -411,18 +442,18 @@
                           <StackPanel>
                             <!-- Query Execution Header -->
                             <Grid ColumnDefinitions="*,Auto">
-                              <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                              <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="8" VerticalAlignment="Center">
                                 <FontIcon Glyph="&#xE8F1;" FontSize="13" Foreground="{ThemeResource AccentFillColorDefaultBrush}" VerticalAlignment="Center" />
-                                <TextBlock Text="DB 쿼리 실행 결과" FontWeight="Bold" FontSize="13.5"
+                                <TextBlock Grid.Column="1" Text="{x:Bind QueryResultTitle}" TextWrapping="Wrap" FontWeight="Bold" FontSize="13.5"
                                            Foreground="{ThemeResource TextFillColorPrimaryBrush}" VerticalAlignment="Center" />
-                                <StackPanel Orientation="Horizontal" Spacing="4" VerticalAlignment="Center">
+                                <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="4" VerticalAlignment="Center">
                                   <TextBlock Text="{x:Bind QueryResult.RowCount, Mode=OneWay}" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                                   <TextBlock Text="행" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                                   <TextBlock Text="•" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                                   <TextBlock Text="{x:Bind QueryResult.ExecutionTimeMs, Mode=OneWay}" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                                   <TextBlock Text="ms" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                                 </StackPanel>
-                              </StackPanel>
+                              </Grid>
 
                               <!-- 접기 / 펼치기 버튼 -->
                               <Button Grid.Column="1" Click="ToggleQueryResult_Click"
@@ -519,123 +550,54 @@
             </StackPanel>
         </ScrollViewer>
 
-        <!-- 2. 아래쪽: 플로팅 통합 입력 바 (통합 구역 가로폭 100% 공유) -->
-        <Grid Grid.Row="1" Background="Transparent" Padding="0,4,0,16" MinWidth="0" HorizontalAlignment="Stretch">
-          <StackPanel HorizontalAlignment="Stretch" Spacing="6">
+        <Border Grid.Row="1" Margin="0,4,0,16" Padding="8,8,8,6" CornerRadius="18"
+                Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+          <Grid RowDefinitions="Auto,Auto" RowSpacing="4">
+            <TextBox x:Name="PromptTextBox" Grid.Row="0"
+                     PlaceholderText="{x:Bind ViewModel.PrimaryInputHint, Mode=OneWay}"
+                     AutomationProperties.Name="채팅 입력" AcceptsReturn="True" TextWrapping="Wrap"
+                     MinHeight="40" MaxHeight="160" Padding="5,4" FontSize="14"
+                     Background="Transparent" BorderThickness="0" IsSpellCheckEnabled="False"
+                     PreviewKeyDown="PromptTextBox_PreviewKeyDown">
+              <TextBox.Resources>
+                <SolidColorBrush x:Key="TextControlBackgroundPointerOver" Color="Transparent" />
+                <SolidColorBrush x:Key="TextControlBackgroundFocused" Color="Transparent" />
+                <SolidColorBrush x:Key="TextControlBorderBrushPointerOver" Color="Transparent" />
+                <SolidColorBrush x:Key="TextControlBorderBrushFocused" Color="Transparent" />
+                <Thickness x:Key="TextControlBorderThemeThicknessFocused">0</Thickness>
+              </TextBox.Resources>
+            </TextBox>
 
-            <!-- 둥근 모서리 사각형 통합 입력 카드 (CornerRadius="18") -->
-              <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
-                      BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
-                      BorderThickness="1"
-                      CornerRadius="18"
-                      Padding="16,12,16,12">
-                <Grid RowDefinitions="Auto,Auto">
-
-                  <!-- 1) Text Input -->
-                  <TextBox Grid.Row="0" x:Name="PromptTextBox"
-                           PlaceholderText="질문을 입력하세요.."
-                           AcceptsReturn="True" TextWrapping="Wrap" MinHeight="52" MaxHeight="160"
-                           BorderThickness="0" Background="Transparent" Padding="6,6,6,8" FontSize="15"
-                           IsSpellCheckEnabled="False"
-                           UseSystemFocusVisuals="False"
-                           PreviewKeyDown="PromptTextBox_PreviewKeyDown">
-                    <TextBox.Resources>
-                      <!-- Background transparency for all states -->
-                      <SolidColorBrush x:Key="TextControlBackground" Color="Transparent" />
-                      <SolidColorBrush x:Key="TextControlBackgroundPointerOver" Color="Transparent" />
-                      <SolidColorBrush x:Key="TextControlBackgroundFocused" Color="Transparent" />
-                      <SolidColorBrush x:Key="TextControlBackgroundDisabled" Color="Transparent" />
-
-                      <!-- Border transparency for all states -->
-                      <SolidColorBrush x:Key="TextControlBorderBrush" Color="Transparent" />
-                      <SolidColorBrush x:Key="TextControlBorderBrushPointerOver" Color="Transparent" />
-                      <SolidColorBrush x:Key="TextControlBorderBrushFocused" Color="Transparent" />
-                      <SolidColorBrush x:Key="TextControlBorderBrushDisabled" Color="Transparent" />
-
-                      <!-- Zero border thickness for all states -->
-                      <Thickness x:Key="TextControlBorderThemeThickness">0</Thickness>
-                      <Thickness x:Key="TextControlBorderThemeThicknessFocused">0</Thickness>
-                    </TextBox.Resources>
-                  </TextBox>
-
-                  <!-- 2) Bottom Control Bar -->
-                  <Grid Grid.Row="1" Margin="0,8,0,0" ColumnDefinitions="Auto,*,Auto">
-                    
-                    <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
-                      <!-- [+] Attach Button -->
-                      <Button Click="AttachButton_Click" CornerRadius="6" Width="32" Height="32" Padding="0"
-                              VerticalAlignment="Center" Background="Transparent" BorderThickness="0"
-                              ToolTipService.ToolTip="JSON 파일 가져오기">
-                        <FontIcon Glyph="&#xE723;" FontSize="14" HorizontalAlignment="Center" VerticalAlignment="Center" />
-                      </Button>
-
-                    </StackPanel>
-
-                    <TextBlock Grid.Column="1" Margin="10,0" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" Text="{x:Bind ViewModel.StatusMessage, Mode=OneWay}" />
-                    <StackPanel Grid.Column="2" Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8" VerticalAlignment="Center">
-                      <!-- Tokens: White Badge (Height="32", vertically centered number) -->
-                      <Border Background="White"
-                              BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
-                              BorderThickness="1" CornerRadius="6" Padding="8,0"
-                              Height="32" VerticalAlignment="Center">
-                        <StackPanel Orientation="Horizontal" Spacing="4" VerticalAlignment="Center">
-                          <TextBlock Text="Tokens:" FontSize="11.5" VerticalAlignment="Center" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                          <TextBox x:Name="TokensTextBox"
-                                   Text="{x:Bind ViewModel.SelectedSession.MaxTokens, Mode=TwoWay, Converter={StaticResource SafeIntConverter}, ConverterParameter=64}"
-                                   LostFocus="TokensTextBox_LostFocus"
-                                   Width="36" Height="26" MinHeight="0" FontSize="12"
-                                   Padding="0,2,0,0"
-                                   TextAlignment="Center"
-                                   VerticalAlignment="Center"
-                                   VerticalContentAlignment="Center"
-                                   Background="Transparent" BorderThickness="0"
-                                   IsSpellCheckEnabled="False"
-                                   UseSystemFocusVisuals="False">
-                            <TextBox.Resources>
-                              <!-- Background transparency for all states -->
-                              <SolidColorBrush x:Key="TextControlBackground" Color="Transparent" />
-                              <SolidColorBrush x:Key="TextControlBackgroundPointerOver" Color="Transparent" />
-                              <SolidColorBrush x:Key="TextControlBackgroundFocused" Color="Transparent" />
-                              <SolidColorBrush x:Key="TextControlBackgroundDisabled" Color="Transparent" />
-
-                              <!-- Border transparency for all states -->
-                              <SolidColorBrush x:Key="TextControlBorderBrush" Color="Transparent" />
-                              <SolidColorBrush x:Key="TextControlBorderBrushPointerOver" Color="Transparent" />
-                              <SolidColorBrush x:Key="TextControlBorderBrushFocused" Color="Transparent" />
-                              <SolidColorBrush x:Key="TextControlBorderBrushDisabled" Color="Transparent" />
-
-                              <!-- Zero border thickness for all states -->
-                              <Thickness x:Key="TextControlBorderThemeThickness">0</Thickness>
-                              <Thickness x:Key="TextControlBorderThemeThicknessFocused">0</Thickness>
-                            </TextBox.Resources>
-                          </TextBox>
-                        </StackPanel>
-                      </Border>
-
-                      <!-- Send Button (Height="32", Width="32") -->
-                      <Button Style="{StaticResource AccentButtonStyle}"
-                              Click="SendButton_Click"
-                              CornerRadius="16" Width="32" Height="32" Padding="0"
-                              VerticalAlignment="Center" ToolTipService.ToolTip="전송 (Enter)">
-                        <Grid>
-                          <FontIcon Glyph="&#xE724;" FontSize="12" HorizontalAlignment="Center" VerticalAlignment="Center"
-                                    Foreground="{ThemeResource TextOnAccentFillColorPrimaryBrush}"
-                                    Visibility="{x:Bind ViewModel.IsGenerating, Mode=OneWay, Converter={StaticResource InverseVisibilityConverter}}" />
-                          <ProgressRing Width="16" Height="16"
-                                        Foreground="White"
-                                        IsActive="{x:Bind ViewModel.IsGenerating, Mode=OneWay}"
-                                        Visibility="{x:Bind ViewModel.IsGenerating, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}" />
-                        </Grid>
-                      </Button>
-                    </StackPanel>
-
+            <Grid Grid.Row="1" ColumnDefinitions="Auto,*,Auto,Auto" ColumnSpacing="4">
+              <Button Grid.Column="0" Click="AttachButton_Click" Background="Transparent" BorderThickness="0"
+                      Visibility="{x:Bind ViewModel.IsSingleMode, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}"
+                      Width="34" Height="34" Padding="0" CornerRadius="17"
+                      AutomationProperties.Name="JSON 파일 가져오기" ToolTipService.ToolTip="JSON 파일 가져오기">
+                <FontIcon Glyph="&#xE710;" FontSize="14" />
+              </Button>
+              <TextBlock Grid.Column="1" Margin="4,0" VerticalAlignment="Center" FontSize="12"
+                         Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextTrimming="CharacterEllipsis"
+                         Text="{x:Bind ViewModel.StatusMessage, Mode=OneWay}"
+                         ToolTipService.ToolTip="{x:Bind ViewModel.StatusMessage, Mode=OneWay}" />
+              <controls:StageRangeSlider Grid.Column="2" x:Name="PipelineRange" VerticalAlignment="Center"
+                                         Visibility="{x:Bind ViewModel.IsDualMode, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}" />
+              <Button Grid.Column="3" Click="SendButton_Click" Width="34" Height="34" Padding="0" CornerRadius="17"
+                      Background="Transparent" BorderThickness="0" AutomationProperties.Name="전송" ToolTipService.ToolTip="전송 (Enter)">
+                <Border Width="28" Height="28" CornerRadius="14" Background="{ThemeResource ComposerGradientBrush}">
+                  <Grid>
+                    <Path Width="9" Height="11" Margin="2,0,0,0" HorizontalAlignment="Center" VerticalAlignment="Center"
+                          Data="M0,0 L9,5.5 L0,11 Z" Fill="{ThemeResource TextOnAccentFillColorPrimaryBrush}"
+                          Visibility="{x:Bind ViewModel.IsGenerating, Mode=OneWay, Converter={StaticResource InverseVisibilityConverter}}" />
+                    <ProgressRing Width="15" Height="15" Foreground="{ThemeResource TextOnAccentFillColorPrimaryBrush}"
+                                  IsActive="{x:Bind ViewModel.IsGenerating, Mode=OneWay}"
+                                  Visibility="{x:Bind ViewModel.IsGenerating, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}" />
                   </Grid>
-
-                </Grid>
-              </Border>
-
-            </StackPanel>
-        </Grid>
+                </Border>
+              </Button>
+            </Grid>
+          </Grid>
+        </Border>
 
       </Grid>
 

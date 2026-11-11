@@ -18,21 +18,30 @@ internal sealed class SqlModel : SafeHandleZeroOrMinusOneIsInvalid
         return model;
     }
 
-    internal (string Sql, string StopReason) Generate(string question, int limit)
+    internal (int Count, string StopReason, double ComputeTimeMs) GenerateIds(
+        int[] prompt, byte[] decodableMask, int eosId, int limit, int[] output)
     {
-        if (question.Contains('\0'))
-            throw new ArgumentException("질문에는 NUL 문자를 사용할 수 없습니다.", nameof(question));
-        if (Native.Generate(this, question, limit, out var result) == 0)
+        if (Native.GenerateIds(this, prompt, prompt.Length, decodableMask, decodableMask.Length,
+            eosId, limit, output, output.Length, out int count, out var stop, out double computeTimeMs) == 0)
             throw EngineError();
-        try
+        string stopReason = stop switch
         {
-            string sql = Marshal.PtrToStringUTF8(result.Data, checked((int)result.Length))!;
-            return (sql, Marshal.PtrToStringUTF8(result.StopReason)!);
-        }
-        finally
-        {
-            Native.Free(ref result);
-        }
+            StopReason.Eos => "eos",
+            StopReason.MaxNewTokens => "max_new_tokens",
+            StopReason.Context => "context",
+            _ => throw new InvalidOperationException($"알 수 없는 추론 종료 코드입니다 ({(int)stop}).")
+        };
+        return (count, stopReason, computeTimeMs);
+    }
+
+    // Full-prefix reference for checking native logits against the contract fixtures.
+    internal double Forward(int[] tokenIds, int tokenCount, float[] logits)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(tokenCount);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(tokenCount, tokenIds.Length);
+        if (Native.Forward(this, tokenIds, tokenCount, logits, logits.Length, out double elapsedMs) == 0)
+            throw EngineError();
+        return elapsedMs;
     }
 
     private static InvalidOperationException EngineError() =>
@@ -44,13 +53,7 @@ internal sealed class SqlModel : SafeHandleZeroOrMinusOneIsInvalid
         return true;
     }
 
-    [StructLayout(LayoutKind.Sequential)]
-    private struct Generation
-    {
-        public IntPtr Data;
-        public nuint Length;
-        public IntPtr StopReason;
-    }
+    private enum StopReason { Eos = 0, MaxNewTokens = 1, Context = 2 }
 
     private static class Native
     {
@@ -59,12 +62,14 @@ internal sealed class SqlModel : SafeHandleZeroOrMinusOneIsInvalid
         [DllImport(Library, EntryPoint = "sql_model_open", CallingConvention = CallingConvention.Cdecl)]
         internal static extern SqlModel Open([MarshalAs(UnmanagedType.LPUTF8Str)] string path);
 
-        [DllImport(Library, EntryPoint = "sql_model_generate", CallingConvention = CallingConvention.Cdecl)]
-        internal static extern int Generate(SqlModel model, [MarshalAs(UnmanagedType.LPUTF8Str)] string question,
-            int limit, out Generation result);
+        [DllImport(Library, EntryPoint = "sql_model_forward", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int Forward(SqlModel model, [In] int[] tokenIds, int tokenCount,
+            [Out] float[] logits, int logitsCapacity, out double elapsedMs);
 
-        [DllImport(Library, EntryPoint = "sql_generation_free", CallingConvention = CallingConvention.Cdecl)]
-        internal static extern void Free(ref Generation result);
+        [DllImport(Library, EntryPoint = "sql_model_generate_ids", CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int GenerateIds(SqlModel model, [In] int[] prompt, int promptCount,
+            [In] byte[] decodableMask, int maskCount, int eosId, int limit, [Out] int[] output,
+            int outputCapacity, out int outputCount, out StopReason stop, out double computeTimeMs);
 
         [DllImport(Library, EntryPoint = "sql_model_close", CallingConvention = CallingConvention.Cdecl)]
         internal static extern void Close(IntPtr model);

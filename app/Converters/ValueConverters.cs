@@ -48,23 +48,6 @@ namespace SqlApp.Converters
         }
     }
 
-    public class ElapsedMsConverter : IValueConverter
-    {
-        public object Convert(object value, Type targetType, object parameter, string language)
-        {
-            if (value is long ms && ms > 0)
-            {
-                return $"{ms} ms";
-            }
-            return "0 ms";
-        }
-
-        public object ConvertBack(object value, Type targetType, object parameter, string language)
-        {
-            throw new NotImplementedException();
-        }
-    }
-
     public class SafeIntConverter : IValueConverter
     {
         public object Convert(object value, Type targetType, object parameter, string language)

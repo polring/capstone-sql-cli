@@ -9,9 +9,13 @@ namespace SqlApp.Services
     public class AssetBundle
     {
         public string Name { get; init; } = string.Empty;
-        public string DirectoryPath => Path.GetDirectoryName(ModelPath)!;
+        public string DirectoryPath { get; init; } = string.Empty;
         public string ModelPath { get; internal set; } = string.Empty;
         public string DbPath { get; internal set; } = string.Empty;
+        public string FrontModelPath { get; internal set; } = string.Empty;
+        public string BackModelPath { get; internal set; } = string.Empty;
+        public bool IsDual { get; init; }
+        public bool HasPreprocessor => false;
 
         public int Stage { get; set; }
         public int Contract { get; set; }
@@ -66,10 +70,9 @@ namespace SqlApp.Services
                 return bundle;
             }
 
-            // Other conversations may already reference this folder.
-            existing.ModelPath = bundle.ModelPath;
-            existing.DbPath = bundle.DbPath;
-            return existing;
+            // A renewed folder is a new snapshot. In-flight runs retain the original paths.
+            bundles[bundles.IndexOf(existing)] = bundle;
+            return bundle;
         }
 
         private static AssetBundle? CreateBundleFromDirectory(string dir)
@@ -77,19 +80,24 @@ namespace SqlApp.Services
             if (!Directory.Exists(dir)) return null;
             dir = Path.TrimEndingDirectorySeparator(Path.GetFullPath(dir));
 
-            string modelPath = Path.Combine(dir, "model.gguf");
-            if (!File.Exists(modelPath))
+            string front = FindFile(dir, "front.gguf");
+            string back = FindFile(dir, "back.gguf");
+            string modelPath = FindFile(dir, "model.gguf");
+            string dbPath = FindFile(dir, "shop.db");
+            bool schemaOnly = dbPath.Length != 0 && !Directory.EnumerateFiles(dir, "*.gguf").Any();
+            bool dual = front.Length > 0 || back.Length > 0 || schemaOnly;
+            if (dual && modelPath.Length > 0) return null;
+            if (!dual && modelPath.Length == 0)
             {
-                modelPath = Directory.EnumerateFiles(dir, "*.gguf").Order(StringComparer.Ordinal).FirstOrDefault() ?? string.Empty;
+                // Preserve legacy bundles without assigning a role to an ambiguous file.
+                string[] candidates = Directory.EnumerateFiles(dir, "*.gguf").Take(2).ToArray();
+                if (candidates.Length != 1) return null;
+                modelPath = candidates[0];
             }
-
-            string dbPath = Path.Combine(dir, "shop.db");
-            if (!File.Exists(dbPath))
-            {
+            if (!dual && dbPath.Length == 0)
                 dbPath = Directory.EnumerateFiles(dir, "*.db").Order(StringComparer.Ordinal).FirstOrDefault() ?? string.Empty;
-            }
 
-            if (!File.Exists(modelPath) || !File.Exists(dbPath))
+            if (!dual && dbPath.Length == 0)
             {
                 return null;
             }
@@ -100,8 +108,12 @@ namespace SqlApp.Services
             var bundle = new AssetBundle
             {
                 Name = dirName,
-                ModelPath = Path.GetFullPath(modelPath),
-                DbPath = Path.GetFullPath(dbPath)
+                DirectoryPath = dir,
+                IsDual = dual,
+                ModelPath = modelPath,
+                DbPath = dbPath,
+                FrontModelPath = front,
+                BackModelPath = back
             };
 
             var stageMatch = StageRegex.Match(dirName);
@@ -119,6 +131,12 @@ namespace SqlApp.Services
             bundle.IsExactContract = !dirName.Contains("-rc", StringComparison.OrdinalIgnoreCase);
 
             return bundle;
+        }
+
+        private static string FindFile(string dir, string name)
+        {
+            string path = Path.Combine(dir, name);
+            return File.Exists(path) ? path : string.Empty;
         }
 
         public static List<AssetBundle> DiscoverBundles()

@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- Run the production services independently of the WinUI/Skia event loop. -->
+    <Compile Include="../../app/Models/*.cs;../../app/Services/**/*.cs;../../app/Interop/**/*.cs;../../app/ViewModels/MainViewModel.cs" />
+    <Using Include="CommunityToolkit.Mvvm.ComponentModel" />
+    <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.2" />
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="9.0.2" />
+    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="3.0.5" />
+    <None Include="../../fixtures/dual/category.json" Link="category.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="../../fixtures/dual/category.expected.json" Link="category.expected.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

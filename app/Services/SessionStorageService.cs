@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Threading.Tasks;
 using SqlApp.Models;
 
@@ -14,6 +15,9 @@ namespace SqlApp.Services
         public DateTime CreatedAt { get; set; }
         public DateTime UpdatedAt { get; set; }
         public string? AssetBundleName { get; set; }
+        public string BundleDirectory { get; set; } = string.Empty;
+        public bool IsDualMode { get; set; }
+        public StageRange? SelectedRange { get; set; }
         public string ModelPath { get; set; } = string.Empty;
         public string DbPath { get; set; } = string.Empty;
         public int MaxTokens { get; set; } = 64;
@@ -27,11 +31,18 @@ namespace SqlApp.Services
         public string Text { get; set; } = string.Empty;
         public string Sql { get; set; } = string.Empty;
         public string? StopReason { get; set; }
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
         public long InferenceTimeMs { get; set; }
+        public double? ComputeTimeMs { get; set; }
         public DateTime Timestamp { get; set; }
         public string? ErrorMessage { get; set; }
         public QueryResultData? QueryResult { get; set; }
         public Guid? ResultMessageId { get; set; }
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public Guid? SourceMessageId { get; set; }
+        public string? AssetDirectory { get; set; }
+        public string? DbPath { get; set; }
+        public PipelineRun? PipelineRun { get; set; }
     }
 
     public class SessionStorageService
@@ -39,12 +50,15 @@ namespace SqlApp.Services
         private readonly string _storagePath;
         private readonly System.Threading.SemaphoreSlim _writeLock = new(1);
 
-        public SessionStorageService()
+        public SessionStorageService() : this(Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "capstone_sql_gui"))
         {
-            string appData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-            string dir = Path.Combine(appData, "capstone_sql_gui");
-            Directory.CreateDirectory(dir);
-            _storagePath = Path.Combine(dir, "sessions.json");
+        }
+
+        internal SessionStorageService(string directory)
+        {
+            Directory.CreateDirectory(directory);
+            _storagePath = Path.Combine(directory, "sessions.json");
         }
 
         public async Task SaveSessionsAsync(IEnumerable<ConversationSession> sessions)
@@ -61,6 +75,9 @@ namespace SqlApp.Services
                         CreatedAt = s.CreatedAt,
                         UpdatedAt = s.UpdatedAt,
                         AssetBundleName = s.Bundle?.Name,
+                        BundleDirectory = s.Bundle?.DirectoryPath ?? s.BundleDirectory,
+                        IsDualMode = s.IsDualMode,
+                        SelectedRange = s.SelectedRange,
                         ModelPath = s.Bundle?.ModelPath ?? string.Empty,
                         DbPath = s.Bundle?.DbPath ?? string.Empty,
                         MaxTokens = s.MaxTokens,
@@ -76,10 +93,15 @@ namespace SqlApp.Services
                             Sql = m.Sql,
                             StopReason = m.StopReason,
                             InferenceTimeMs = m.InferenceTimeMs,
+                            ComputeTimeMs = m.ComputeTimeMs,
                             Timestamp = m.Timestamp,
                             ErrorMessage = m.ErrorMessage,
                             QueryResult = m.QueryResult,
-                            ResultMessageId = m.ResultMessageId
+                            ResultMessageId = m.ResultMessageId,
+                            SourceMessageId = m.SourceMessageId,
+                            AssetDirectory = m.AssetDirectory,
+                            DbPath = m.DbPath,
+                            PipelineRun = m.PipelineRun
                         });
                     }
                     dtos.Add(dto);
@@ -98,30 +120,34 @@ namespace SqlApp.Services
                     _writeLock.Release();
                 }
             }
-            catch { }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                System.Diagnostics.Debug.WriteLine($"Could not save session history: {ex.Message}");
+            }
         }
 
         private static AssetBundle? RestoreBundle(SessionStorageDto dto, IList<AssetBundle> bundles, IReadOnlyList<AssetBundle> defaults)
         {
             var comparison = AssetDiscoveryService.PathComparison;
-            var exact = bundles.FirstOrDefault(b => b.ModelPath.Equals(dto.ModelPath, comparison)
-                                                 && b.DbPath.Equals(dto.DbPath, comparison));
-            if (exact != null) return exact;
-
-            string? folder = Path.GetDirectoryName(dto.ModelPath);
-            if (folder != null && Path.IsPathFullyQualified(folder)
-                && folder.Equals(Path.GetDirectoryName(dto.DbPath), comparison))
+            var folder = dto.BundleDirectory;
+            if (string.IsNullOrEmpty(folder) && !string.IsNullOrEmpty(dto.ModelPath))
+                folder = Path.GetDirectoryName(dto.ModelPath) ?? "";
+            if (!string.IsNullOrEmpty(folder))
             {
-                // Resolve the saved directory before falling back to a built-in folder with the same name.
+                var exact = bundles.FirstOrDefault(b => b.IsDual == dto.IsDualMode && b.DirectoryPath.Equals(folder, comparison));
+                if (exact != null) return exact;
+                if (!Path.IsPathFullyQualified(folder)) return null;
                 try
                 {
                     var restored = AssetDiscoveryService.AddFolder(bundles, folder);
-                    if (restored != null) return restored;
+                    return restored?.IsDual == dto.IsDualMode ? restored : null;
                 }
                 catch (IOException) { }
                 catch (UnauthorizedAccessException) { }
+                return null;
             }
-            return defaults.FirstOrDefault(b => b.Name.Equals(dto.AssetBundleName, comparison)) ?? defaults.FirstOrDefault();
+            return defaults.FirstOrDefault(b => b.IsDual == dto.IsDualMode && b.Name.Equals(dto.AssetBundleName, comparison))
+                ?? defaults.FirstOrDefault(b => b.IsDual == dto.IsDualMode);
         }
 
         public async Task<List<ConversationSession>> LoadSessionsAsync(IList<AssetBundle> bundles)
@@ -136,6 +162,7 @@ namespace SqlApp.Services
                 if (dtos == null) return list;
 
                 var defaults = bundles.ToArray();
+                var validator = new SqlExecutionService();
                 foreach (var dto in dtos)
                 {
                     var s = new ConversationSession
@@ -145,12 +172,15 @@ namespace SqlApp.Services
                         CreatedAt = dto.CreatedAt,
                         UpdatedAt = dto.UpdatedAt,
                         Bundle = RestoreBundle(dto, bundles, defaults),
+                        BundleDirectory = dto.BundleDirectory.Length > 0 ? dto.BundleDirectory : Path.GetDirectoryName(dto.ModelPath) ?? "",
+                        IsDualMode = dto.IsDualMode,
+                        SelectedRange = dto.SelectedRange ?? new StageRange(PipelineStage.Front, PipelineStage.Postprocessor),
                         MaxTokens = dto.MaxTokens,
                     };
 
                     foreach (var m in dto.Messages)
                     {
-                        s.Messages.Add(new ChatMessage
+                        var message = new ChatMessage
                         {
                             Id = m.Id,
                             Sender = m.Sender,
@@ -158,16 +188,26 @@ namespace SqlApp.Services
                             Sql = m.Sql,
                             StopReason = m.StopReason,
                             InferenceTimeMs = m.InferenceTimeMs,
+                            ComputeTimeMs = m.ComputeTimeMs,
                             Timestamp = m.Timestamp,
                             ErrorMessage = m.ErrorMessage,
                             QueryResult = m.QueryResult,
-                            ResultMessageId = m.ResultMessageId
-                        });
+                            ResultMessageId = m.ResultMessageId,
+                            SourceMessageId = m.SourceMessageId,
+                            AssetDirectory = m.AssetDirectory ?? m.PipelineRun?.BundleDirectory ?? s.BundleDirectory,
+                            DbPath = m.DbPath ?? m.PipelineRun?.DbPath ?? dto.DbPath,
+                            PipelineRun = m.PipelineRun
+                        };
+                        await validator.ValidateMessageAsync(message);
+                        s.Messages.Add(message);
                     }
                     list.Add(s);
                 }
             }
-            catch { }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
+            {
+                System.Diagnostics.Debug.WriteLine($"Could not load session history: {ex.Message}");
+            }
 
             return list;
         }

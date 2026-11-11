@@ -9,7 +9,26 @@
         <XamlControlsResources xmlns="using:Microsoft.UI.Xaml.Controls" />
       </ResourceDictionary.MergedDictionaries>
 
-      <!-- Add resources here -->
+      <ResourceDictionary.ThemeDictionaries>
+        <ResourceDictionary x:Key="Light">
+          <SolidColorBrush x:Key="RangeAccent" Color="#6745BA" />
+          <LinearGradientBrush x:Key="ComposerGradientBrush" StartPoint="0,0.5" EndPoint="1,0.5">
+            <GradientStop Color="#595AD4" Offset="0" />
+            <GradientStop Color="#9A6CE1" Offset="1" />
+          </LinearGradientBrush>
+        </ResourceDictionary>
+        <ResourceDictionary x:Key="Default">
+          <SolidColorBrush x:Key="RangeAccent" Color="#C6AEFF" />
+          <LinearGradientBrush x:Key="ComposerGradientBrush" StartPoint="0,0.5" EndPoint="1,0.5">
+            <GradientStop Color="#8179F0" Offset="0" />
+            <GradientStop Color="#B686FF" Offset="1" />
+          </LinearGradientBrush>
+        </ResourceDictionary>
+        <ResourceDictionary x:Key="HighContrast">
+          <SolidColorBrush x:Key="RangeAccent" Color="{ThemeResource SystemColorWindowTextColor}" />
+          <SolidColorBrush x:Key="ComposerGradientBrush" Color="{ThemeResource SystemColorHighlightColor}" />
+        </ResourceDictionary>
+      </ResourceDictionary.ThemeDictionaries>
 
     </ResourceDictionary>
   </Application.Resources>

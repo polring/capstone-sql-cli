@@ -1,0 +1,91 @@
+<UserControl x:Class="SqlApp.Controls.StageRangeSlider"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <UserControl.Resources>
+    <ResourceDictionary>
+      <ControlTemplate x:Key="HandleTemplate" TargetType="ContentControl">
+        <Grid Background="Transparent">
+          <Border Width="19" Height="19" CornerRadius="10" BorderThickness="1"
+                  BorderBrush="{ThemeResource ControlStrongStrokeColorDefaultBrush}"
+                  Background="{ThemeResource SolidBackgroundFillColorBaseBrush}" />
+        </Grid>
+      </ControlTemplate>
+    </ResourceDictionary>
+  </UserControl.Resources>
+
+  <Button x:Name="RangeButton" Background="Transparent" BorderThickness="0"
+          Height="34" MinWidth="0" Padding="8,0" CornerRadius="10"
+          ToolTipService.ToolTip="실행 구간 선택">
+    <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+      <TextBlock Text="실행 구간" FontSize="12" VerticalAlignment="Center"
+                 Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+      <TextBlock x:Name="TriggerTitle" FontSize="13" FontWeight="SemiBold"
+                 VerticalAlignment="Center" Foreground="{ThemeResource RangeAccent}" />
+      <FontIcon x:Name="Chevron" Glyph="&#xE70D;" FontSize="10" VerticalAlignment="Center"
+                Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+    </StackPanel>
+    <Button.Flyout>
+      <Flyout x:Name="RangeFlyout" Placement="TopEdgeAlignedRight" Opened="Flyout_Opened" Closed="Flyout_Closed">
+        <Flyout.FlyoutPresenterStyle>
+          <Style TargetType="FlyoutPresenter">
+            <Setter Property="Padding" Value="8" />
+            <Setter Property="CornerRadius" Value="14" />
+          </Style>
+        </Flyout.FlyoutPresenterStyle>
+        <Grid Width="280">
+          <Grid x:Name="SliderView" RowDefinitions="Auto,36" ColumnDefinitions="*,30" Padding="0,4,0,0">
+            <Grid Margin="18,0" ColumnDefinitions="*,*,*,*" IsHitTestVisible="False">
+              <TextBlock Text="앞모델" HorizontalAlignment="Center" FontSize="12" />
+              <TextBlock Grid.Column="1" Text="매퍼" HorizontalAlignment="Center" FontSize="12" />
+              <TextBlock Grid.Column="2" Text="뒷모델" HorizontalAlignment="Center" FontSize="12" />
+              <TextBlock Grid.Column="3" Text="후처리기" HorizontalAlignment="Center" FontSize="12" />
+            </Grid>
+            <Grid x:Name="Track" Grid.Row="1" SizeChanged="Track_SizeChanged" Margin="18,0" IsHitTestVisible="False">
+              <Border Height="10" VerticalAlignment="Center" CornerRadius="5"
+                      Background="{ThemeResource ControlStrongFillColorDefaultBrush}" />
+              <Canvas>
+                <Border x:Name="SelectedBand" Height="10" CornerRadius="5" Canvas.Top="13"
+                        Background="{ThemeResource ComposerGradientBrush}" />
+              </Canvas>
+              <Grid ColumnDefinitions="*,*,*,*" Height="10" VerticalAlignment="Center">
+                <Ellipse Width="3" Height="3" Fill="{ThemeResource SolidBackgroundFillColorBaseBrush}" />
+                <Ellipse Grid.Column="1" Width="3" Height="3" Fill="{ThemeResource SolidBackgroundFillColorBaseBrush}" />
+                <Ellipse Grid.Column="2" Width="3" Height="3" Fill="{ThemeResource SolidBackgroundFillColorBaseBrush}" />
+                <Ellipse Grid.Column="3" Width="3" Height="3" Fill="{ThemeResource SolidBackgroundFillColorBaseBrush}" />
+              </Grid>
+            </Grid>
+            <Canvas Grid.Row="1">
+              <ContentControl x:Name="StartHandle" Width="36" Height="36" IsTabStop="True"
+                              UseSystemFocusVisuals="True" Template="{StaticResource HandleTemplate}"
+                              ManipulationMode="None" PointerPressed="Handle_PointerPressed"
+                              PointerMoved="Handle_PointerMoved" PointerReleased="Handle_PointerReleased"
+                              PointerCaptureLost="Handle_PointerCaptureLost" KeyDown="Handle_KeyDown" />
+              <ContentControl x:Name="EndHandle" Width="36" Height="36" IsTabStop="True"
+                              UseSystemFocusVisuals="True" Template="{StaticResource HandleTemplate}"
+                              ManipulationMode="None" PointerPressed="Handle_PointerPressed"
+                              PointerMoved="Handle_PointerMoved" PointerReleased="Handle_PointerReleased"
+                              PointerCaptureLost="Handle_PointerCaptureLost" KeyDown="Handle_KeyDown" />
+            </Canvas>
+            <Button x:Name="ShowChoicesButton" Grid.Column="1" Grid.RowSpan="2" VerticalAlignment="Center"
+                    Width="30" Height="34" MinWidth="0" Padding="0" CornerRadius="8"
+                    Background="Transparent" BorderThickness="0" Click="ShowChoices_Click"
+                    AutomationProperties.Name="다섯 실행 구간 보기" ToolTipService.ToolTip="실행 구간 목록">
+              <FontIcon Glyph="&#xE76C;" FontSize="12" />
+            </Button>
+          </Grid>
+          <ListView x:Name="RangeOptions" Visibility="Collapsed" SelectionMode="Single" SingleSelectionFollowsFocus="False"
+                    IsItemClickEnabled="True" ItemClick="Option_Click" SelectionChanged="Option_SelectionChanged"
+                    AutomationProperties.Name="실행 구간 선택">
+            <ListView.ItemContainerStyle>
+              <Style TargetType="ListViewItem">
+                <Setter Property="FontSize" Value="13" />
+                <Setter Property="MinHeight" Value="34" />
+                <Setter Property="Padding" Value="12,2" />
+              </Style>
+            </ListView.ItemContainerStyle>
+          </ListView>
+        </Grid>
+      </Flyout>
+    </Button.Flyout>
+  </Button>
+</UserControl>

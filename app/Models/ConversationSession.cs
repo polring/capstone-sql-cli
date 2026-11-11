@@ -9,6 +9,13 @@ public sealed partial class ConversationSession : ObservableObject
     public DateTime CreatedAt { get; set; } = DateTime.Now;
     public DateTime UpdatedAt { get; set; } = DateTime.Now;
     public AssetBundle? Bundle { get; set; }
+    public string BundleDirectory { get; set; } = string.Empty;
+    public bool IsDualMode { get; set; }
+    public StageRange SelectedRange
+    {
+        get;
+        set => field = value.SnapForSelection();
+    } = new(PipelineStage.Front, PipelineStage.Postprocessor);
 
     [ObservableProperty] public partial string Title { get; set; } = string.Empty;
     [ObservableProperty] public partial bool IsEditingTitle { get; set; }

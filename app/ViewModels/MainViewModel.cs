@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
-using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
@@ -10,6 +9,7 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using SqlApp.Models;
 using SqlApp.Services;
+using SqlApp.Services.Pipeline;
 
 namespace SqlApp.ViewModels
 {
@@ -18,6 +18,10 @@ namespace SqlApp.ViewModels
         private readonly SqlExecutionService _sqlExecutionService;
         private readonly InferenceService _inferenceService;
         private readonly SessionStorageService _sessionStorageService;
+        private readonly List<AssetBundle> _allBundles;
+        private readonly Func<PipelineStage, string, string, int, Task<InferenceResult>> _runStage;
+        internal Task Initialization { get; }
+        private bool _refreshingBundleChoices;
 
         public ObservableCollection<ConversationSession> Sessions { get; } = new();
 
@@ -26,7 +30,11 @@ namespace SqlApp.ViewModels
 
         partial void OnSelectedSessionChanged(ConversationSession? value)
         {
-            NotifyBundleProperties();
+            ClearInputs();
+            if (value?.Bundle is { } previous)
+                value.Bundle = _allBundles.FirstOrDefault(b => b.IsDual == value.IsDualMode &&
+                    b.DirectoryPath.Equals(previous.DirectoryPath, AssetDiscoveryService.PathComparison));
+            RefreshBundleChoices();
             _ = LoadSchemaAsync();
         }
 
@@ -39,26 +47,102 @@ namespace SqlApp.ViewModels
         [ObservableProperty]
         public partial string StatusMessage { get; set; } = string.Empty;
 
-        public ObservableCollection<AssetBundle> AvailableBundles { get; } = new(AssetDiscoveryService.DiscoverBundles());
+        public ObservableCollection<AssetBundle> AvailableBundles { get; } = new();
 
         public AssetBundle? CurrentSessionBundle => SelectedSession?.Bundle;
+        public bool IsDualMode => SelectedSession?.IsDualMode == true;
+        public bool IsSingleMode => !IsDualMode;
+        public bool HasPreprocessor => CurrentSessionBundle?.HasPreprocessor == true;
+        public StageRange SelectedRange => SelectedSession?.SelectedRange ?? new(PipelineStage.Front, PipelineStage.Postprocessor);
+        public string PrimaryInputHint => !IsDualMode ? "질문을 입력하세요."
+            : SelectedRange.Start == PipelineStage.Back ? "매퍼가 생성한 일반화 질문을 입력하세요."
+            : "앞모델에 전달할 질문을 입력하세요.";
+
+        private string? GetRangeUnavailableReason(AssetBundle? bundle, StageRange range)
+        {
+            if (bundle == null || !bundle.IsDual) return "이중 모델 에셋 폴더를 선택하세요.";
+            foreach (var stage in new[] { PipelineStage.Front, PipelineStage.Back })
+            {
+                if (!range.Contains(stage)) continue;
+                var path = stage == PipelineStage.Front ? bundle.FrontModelPath : bundle.BackModelPath;
+                var reason = _inferenceService.GetStageUnavailableReason(stage, path);
+                if (reason != null) return reason;
+            }
+            if ((range.Contains(PipelineStage.Mapper) || range.Contains(PipelineStage.Postprocessor)) && !File.Exists(bundle.DbPath))
+                return "이 구간에 필요한 shop.db가 에셋 폴더에 없습니다.";
+            return null;
+        }
+
+        private void ClearInputs()
+        {
+            InputText = string.Empty;
+            StatusMessage = string.Empty;
+        }
+
+        private void RefreshBundleChoices()
+        {
+            _refreshingBundleChoices = true;
+            try
+            {
+                AvailableBundles.Clear();
+                foreach (var bundle in _allBundles.Where(b => b.IsDual == IsDualMode))
+                    AvailableBundles.Add(bundle);
+            }
+            finally { _refreshingBundleChoices = false; }
+            NotifyBundleProperties();
+        }
+
+        public void SetDualMode(bool dual)
+        {
+            var session = SelectedSession;
+            if (session == null || dual == session.IsDualMode) return;
+            session.IsDualMode = dual;
+            var bundle = _allBundles.FirstOrDefault(b => b.IsDual == dual);
+            session.Bundle = bundle;
+            session.BundleDirectory = bundle?.DirectoryPath ?? "";
+            session.SelectedRange = DefaultRange(bundle);
+            ClearInputs();
+            RefreshBundleChoices();
+            _ = LoadSchemaAsync();
+            _ = _sessionStorageService.SaveSessionsAsync(Sessions);
+        }
+
+        private static StageRange DefaultRange(AssetBundle? bundle) =>
+            bundle is { IsDual: true, FrontModelPath.Length: 0, BackModelPath.Length: > 0 } ? new(PipelineStage.Back, PipelineStage.Back) :
+            bundle is { IsDual: true, BackModelPath.Length: 0 } or { IsDual: true, DbPath.Length: 0 } ? new(PipelineStage.Front, PipelineStage.Front) :
+            new(PipelineStage.Front, PipelineStage.Postprocessor);
+
+        public void SelectRange(StageRange range)
+        {
+            if (SelectedSession is not { IsDualMode: true } session) return;
+            var previous = session.SelectedRange;
+            session.SelectedRange = range;
+            if (session.SelectedRange == previous) return;
+            NotifyRangeProperties();
+            _ = _sessionStorageService.SaveSessionsAsync(Sessions);
+        }
 
         public void SelectAssetFolder(string folderPath)
         {
-            var bundle = AssetDiscoveryService.AddFolder(AvailableBundles, folderPath);
-            if (bundle == null)
+            var bundle = AssetDiscoveryService.AddFolder(_allBundles, folderPath);
+            if (bundle == null || bundle.IsDual != IsDualMode)
             {
-                StatusMessage = "선택한 폴더에 .gguf 모델과 .db 파일이 모두 있어야 합니다.";
+                StatusMessage = IsDualMode ? "front.gguf, back.gguf 또는 shop.db가 있는 이중 모델 폴더를 선택하세요."
+                    : "단일 .gguf 모델과 .db가 있는 단일 모델 폴더를 선택하세요.";
                 return;
             }
+            RefreshBundleChoices();
             SelectBundle(bundle);
         }
 
         public void SelectBundle(AssetBundle? bundle)
         {
-            if (bundle == null || SelectedSession == null || !AvailableBundles.Contains(bundle)) return;
+            if (_refreshingBundleChoices || bundle == null || SelectedSession == null ||
+                bundle.IsDual != IsDualMode || !AvailableBundles.Contains(bundle)) return;
             SelectedSession.Bundle = bundle;
-            StatusMessage = string.Empty;
+            SelectedSession.BundleDirectory = bundle.DirectoryPath;
+            SelectedSession.SelectedRange = DefaultRange(bundle);
+            ClearInputs();
             NotifyBundleProperties();
             _ = LoadSchemaAsync();
             _ = _sessionStorageService.SaveSessionsAsync(Sessions);
@@ -66,6 +150,10 @@ namespace SqlApp.ViewModels
 
         private void NotifyBundleProperties()
         {
+            OnPropertyChanged(nameof(IsSingleMode));
+            OnPropertyChanged(nameof(IsDualMode));
+            OnPropertyChanged(nameof(HasPreprocessor));
+            NotifyRangeProperties();
             OnPropertyChanged(nameof(CurrentSessionBundle));
             OnPropertyChanged(nameof(SelectedModelFileName));
             OnPropertyChanged(nameof(SelectedDbFileName));
@@ -73,9 +161,26 @@ namespace SqlApp.ViewModels
             OnPropertyChanged(nameof(SelectedDbPath));
         }
 
-        public string SelectedModelPath => CurrentSessionBundle?.ModelPath ?? string.Empty;
+        private void NotifyRangeProperties()
+        {
+            OnPropertyChanged(nameof(SelectedRange));
+            OnPropertyChanged(nameof(PrimaryInputHint));
+        }
+
+        private string ModelPaths(bool fileNames)
+        {
+            if (CurrentSessionBundle is not { } bundle) return "";
+            string Format(string path) => fileNames ? Path.GetFileName(path) : path;
+            if (!bundle.IsDual) return Format(bundle.ModelPath);
+            var roles = new List<string>();
+            if (bundle.FrontModelPath.Length > 0) roles.Add($"앞모델 · {Format(bundle.FrontModelPath)}");
+            if (bundle.BackModelPath.Length > 0) roles.Add($"뒷모델 · {Format(bundle.BackModelPath)}");
+            return string.Join(" / ", roles);
+        }
+
+        public string SelectedModelPath => ModelPaths(false);
         public string SelectedDbPath => CurrentSessionBundle?.DbPath ?? string.Empty;
-        public string SelectedModelFileName => SelectedModelPath.Length == 0 ? "(없음)" : Path.GetFileName(SelectedModelPath);
+        public string SelectedModelFileName => ModelPaths(true) is { Length: > 0 } name ? name : "(없음)";
         public string SelectedDbFileName => SelectedDbPath.Length == 0 ? "(없음)" : Path.GetFileName(SelectedDbPath);
 
         public ObservableCollection<TableSchemaInfo> CurrentSchema { get; } = new();
@@ -83,18 +188,20 @@ namespace SqlApp.ViewModels
         [ObservableProperty]
         public partial bool IsLoadingSchema { get; set; }
 
-        public MainViewModel()
+        internal MainViewModel(List<AssetBundle> bundles, SessionStorageService sessionStorage, InferenceService inference,
+            Func<PipelineStage, string, string, int, Task<InferenceResult>>? runStage = null)
         {
+            _allBundles = bundles;
             _sqlExecutionService = new SqlExecutionService();
-            _inferenceService = new InferenceService();
-            _sessionStorageService = new SessionStorageService();
-
-            _ = LoadInitialSessionsAsync();
+            _inferenceService = inference;
+            _runStage = runStage ?? inference.RunStageAsync;
+            _sessionStorageService = sessionStorage;
+            Initialization = LoadInitialSessionsAsync();
         }
 
         private async Task LoadInitialSessionsAsync()
         {
-            var saved = await _sessionStorageService.LoadSessionsAsync(AvailableBundles);
+            var saved = await _sessionStorageService.LoadSessionsAsync(_allBundles);
             if (saved.Count == 0)
             {
                 CreateNewSession();
@@ -114,7 +221,7 @@ namespace SqlApp.ViewModels
             var session = new ConversationSession
             {
                 Title = $"새 대화 {Sessions.Count + 1}",
-                Bundle = AvailableBundles.FirstOrDefault(),
+                Bundle = _allBundles.FirstOrDefault(b => !b.IsDual),
                 MaxTokens = 64
             };
 
@@ -184,10 +291,10 @@ namespace SqlApp.ViewModels
         [RelayCommand]
         public async Task LoadSchemaAsync()
         {
-            var bundle = GetAvailableSessionBundle();
-            if (bundle == null)
+            var bundle = CurrentSessionBundle;
+            CurrentSchema.Clear();
+            if (bundle == null || !File.Exists(bundle.DbPath))
             {
-                CurrentSchema.Clear();
                 IsLoadingSchema = false;
                 return;
             }
@@ -212,7 +319,7 @@ namespace SqlApp.ViewModels
         [RelayCommand]
         public void UsePromptSuggestion(string? suggestion)
         {
-            if (!string.IsNullOrWhiteSpace(suggestion))
+            if (IsSingleMode && !string.IsNullOrWhiteSpace(suggestion))
             {
                 InputText = suggestion;
             }
@@ -221,82 +328,123 @@ namespace SqlApp.ViewModels
         [RelayCommand]
         public async Task SendMessageAsync()
         {
-            if (SelectedSession == null || string.IsNullOrWhiteSpace(InputText) || IsGenerating)
+            var session = SelectedSession;
+            if (session == null || string.IsNullOrWhiteSpace(InputText) || IsGenerating)
             {
                 return;
             }
 
-            var bundle = GetAvailableSessionBundle();
+            bool dual = IsDualMode;
+            var range = SelectedRange;
+            if (dual && GetRangeUnavailableReason(CurrentSessionBundle, range) is { } reason)
+            {
+                StatusMessage = reason;
+                return;
+            }
+            var bundle = dual ? CurrentSessionBundle : GetAvailableSessionBundle();
             if (bundle == null) return;
 
-            string question = InputText;
-            InputText = string.Empty;
+            string chatInput = InputText;
+            int maxTokens = session.MaxTokens;
+            ClearInputs();
 
             // Auto-rename session title on first message
-            if (SelectedSession.Messages.Count == 0 || SelectedSession.Title.StartsWith("새 대화", StringComparison.Ordinal))
+            if (session.Messages.Count == 0 || session.Title.StartsWith("새 대화", StringComparison.Ordinal))
             {
-                SelectedSession.Title = question.Length > 20 ? question[..20] + "..." : question;
+                session.Title = chatInput.Length > 20 ? chatInput[..20] + "..." : chatInput;
             }
 
             // User Message
             var userMsg = new ChatMessage
             {
                 Sender = MessageSender.User,
-                Text = question
+                Text = chatInput
             };
-            SelectedSession.Messages.Add(userMsg);
+            session.Messages.Add(userMsg);
 
             // Assistant placeholder message
             var assistantMsg = new ChatMessage
             {
-                Sender = MessageSender.Assistant
+                Sender = MessageSender.Assistant,
+                DbPath = bundle.DbPath,
+                AssetDirectory = bundle.DirectoryPath
             };
-            SelectedSession.Messages.Add(assistantMsg);
+            session.Messages.Add(assistantMsg);
 
             IsGenerating = true;
-            StatusMessage = "SQL 생성 중...";
+            StatusMessage = dual ? "선택한 구간 실행 중..." : "SQL 생성 중...";
 
             try
             {
-                var sw = Stopwatch.StartNew();
+                if (dual)
+                {
+                    IReadOnlyList<TableSchemaInfo> schema = Array.Empty<TableSchemaInfo>();
+                    if (range.Contains(PipelineStage.Mapper) || range.Contains(PipelineStage.Postprocessor))
+                        schema = await _sqlExecutionService.GetDatabaseSchemaAsync(bundle.DbPath);
 
-                var result = await _inferenceService.RunQueryAsync(
-                    bundle.ModelPath, question, SelectedSession.MaxTokens);
-                assistantMsg.Sql = result.Sql;
-                assistantMsg.StopReason = result.StopReason;
-                assistantMsg.InferenceTimeMs = sw.ElapsedMilliseconds;
-
-                StatusMessage = $"완료 ({assistantMsg.InferenceTimeMs}ms)";
+                    var run = await PipelineRunner.RunAsync(range, chatInput, "", bundle.DirectoryPath, bundle.DbPath, schema,
+                        (stage, input) => _runStage(stage,
+                            stage == PipelineStage.Front ? bundle.FrontModelPath : bundle.BackModelPath, input, maxTokens),
+                        session.Id, assistantMsg.Id);
+                    assistantMsg.PipelineRun = run;
+                    assistantMsg.ComputeTimeMs = run.ComputeTimeMs;
+                    assistantMsg.Sql = run.FinalSql;
+                    assistantMsg.StopReason = run.Steps.LastOrDefault()?.StopReason;
+                    if (run.Error.Length > 0) assistantMsg.ErrorMessage = run.Error;
+                }
+                else
+                {
+                    var result = await _inferenceService.RunQueryAsync(bundle.ModelPath, chatInput, maxTokens);
+                    assistantMsg.ComputeTimeMs = result.ComputeTimeMs;
+                    assistantMsg.Sql = result.Text;
+                    assistantMsg.StopReason = result.StopReason;
+                }
+                await _sqlExecutionService.ValidateMessageAsync(assistantMsg);
             }
             catch (Exception ex)
             {
                 assistantMsg.ErrorMessage = $"오류 발생: {ex.Message}";
-                StatusMessage = "추론 중 오류가 발생했습니다.";
+                if (dual)
+                    assistantMsg.PipelineRun = new PipelineRun
+                    {
+                        Input = chatInput, Range = range,
+                        BundleDirectory = bundle.DirectoryPath, DbPath = bundle.DbPath, Error = ex.Message
+                    };
             }
             finally
             {
                 IsGenerating = false;
+                if (SelectedSession == session && CurrentSessionBundle == bundle)
+                {
+                    if (assistantMsg.HasError) StatusMessage = assistantMsg.ErrorMessage!;
+                    else if (assistantMsg.HasGenerationWarning) StatusMessage = assistantMsg.GenerationWarning;
+                    else if (assistantMsg.HasSqlValidationError) StatusMessage = assistantMsg.SqlValidationError!;
+                    else StatusMessage = string.Empty;
+                }
                 _ = _sessionStorageService.SaveSessionsAsync(Sessions);
             }
         }
 
         [RelayCommand]
-        public async Task RunSqlAsync(ChatMessage? message)
+        public Task RunSqlAsync(ChatMessage? message) =>
+            message?.SqlCandidates is { Count: 1 } candidates ? RunCandidateAsync(candidates[0]) : Task.CompletedTask;
+
+        [RelayCommand(AllowConcurrentExecutions = true)]
+        public async Task RunCandidateAsync(ChatSqlCandidate? candidate)
         {
-            if (message == null || string.IsNullOrWhiteSpace(message.Sql) || SelectedSession == null)
-            {
-                return;
-            }
-
             var session = SelectedSession;
-            var bundle = GetAvailableSessionBundle();
-            if (bundle == null) return;
+            if (candidate == null || !candidate.CanExecuteSql || session == null) return;
+            var message = candidate.Message;
+            if (!session.Messages.Contains(message) || !message.SqlCandidates.Contains(candidate)) return;
 
+            candidate.IsRunning = true;
             message.IsRunningQuery = true;
             try
             {
-                var result = await _sqlExecutionService.ExecuteQueryAsync(bundle.DbPath, message.Sql);
-                ApplyQueryResult(session, message, result);
+                var result = await _sqlExecutionService.ExecuteQueryAsync(message.DbPath, candidate.Sql);
+                if (result.HasError)
+                    await _sqlExecutionService.ValidateMessageAsync(message);
+                ApplyQueryResult(session, candidate, result);
             }
             catch (Exception ex)
             {
@@ -304,87 +452,62 @@ namespace SqlApp.ViewModels
                 {
                     ErrorMessage = $"실행 실패: {ex.Message}"
                 };
-                ApplyQueryResult(session, message, errorResult);
+                ApplyQueryResult(session, candidate, errorResult);
             }
             finally
             {
-                message.IsRunningQuery = false;
+                candidate.IsRunning = false;
+                message.IsRunningQuery = message.SqlCandidates.Any(c => c.IsRunning);
+                message.NotifySqlValidation();
                 _ = _sessionStorageService.SaveSessionsAsync(Sessions);
             }
         }
 
-        private static void ApplyQueryResult(ConversationSession session, ChatMessage message, QueryResultData result)
+        private static void ApplyQueryResult(ConversationSession session, ChatSqlCandidate candidate, QueryResultData result)
         {
-            // 1. 이미 생성된 결과 말풍선이 있는지 확인 (ID 매칭 또는 바로 다음 메시지 확인)
-            ChatMessage? existingResultMsg = null;
-            if (message.ResultMessageId.HasValue)
+            var message = candidate.Message;
+            var existing = session.Messages.FirstOrDefault(m => m.IsQueryResultSender &&
+                m.SourceMessageId == message.Id && m.Sql == candidate.Sql);
+            int index = session.Messages.IndexOf(message);
+            if (index < 0) return;
+            bool single = message.SqlCandidates.Count == 1;
+            if (existing == null && single)
             {
-                existingResultMsg = session.Messages.FirstOrDefault(m => m.Id == message.ResultMessageId.Value);
+                // Older sessions linked one result by ID or placed it immediately after the SQL.
+                existing = session.Messages.FirstOrDefault(m => m.IsQueryResultSender && m.Id == message.ResultMessageId);
+                if (existing == null && index + 1 < session.Messages.Count &&
+                    session.Messages[index + 1] is { IsQueryResultSender: true, SourceMessageId: null } adjacent)
+                    existing = adjacent;
+            }
+            if (existing != null)
+            {
+                existing.SourceMessageId = message.Id;
+                existing.QueryResult = result;
+                existing.IsQueryResultExpanded = true;
+                if (single) message.ResultMessageId = existing.Id;
+                return;
             }
 
-            if (existingResultMsg == null)
+            var resultMessage = new ChatMessage
             {
-                int currentIdx = session.Messages.IndexOf(message);
-                if (currentIdx >= 0 && currentIdx + 1 < session.Messages.Count &&
-                    session.Messages[currentIdx + 1].Sender == MessageSender.QueryResult)
-                {
-                    existingResultMsg = session.Messages[currentIdx + 1];
-                    message.ResultMessageId = existingResultMsg.Id;
-                }
-            }
-
-            // 2. 이미 존재하면 기존 말풍선에 결과만 갱신
-            if (existingResultMsg != null)
-            {
-                existingResultMsg.QueryResult = result;
-                existingResultMsg.IsQueryResultExpanded = true;
-            }
-            else
-            {
-                // 3. 존재하지 않으면 새 말풍선 생성 후 해당 모델 메시지 바로 아래에 삽입
-                var newResultMsg = new ChatMessage
-                {
-                    Sender = MessageSender.QueryResult,
-                    Sql = message.Sql,
-                    QueryResult = result,
-                    IsQueryResultExpanded = true
-                };
-                message.ResultMessageId = newResultMsg.Id;
-
-                int index = session.Messages.IndexOf(message);
-                if (index >= 0 && index + 1 <= session.Messages.Count)
-                {
-                    session.Messages.Insert(index + 1, newResultMsg);
-                }
-                else
-                {
-                    session.Messages.Add(newResultMsg);
-                }
-            }
-        }
-
-        [RelayCommand]
-        public void CopySql(string? sql)
-        {
-            if (string.IsNullOrWhiteSpace(sql)) return;
-
-            try
-            {
-                var dataPackage = new Windows.ApplicationModel.DataTransfer.DataPackage();
-                dataPackage.SetText(sql);
-                Windows.ApplicationModel.DataTransfer.Clipboard.SetContent(dataPackage);
-                StatusMessage = "SQL이 클립보드에 복사되었습니다.";
-            }
-            catch (Exception ex)
-            {
-                StatusMessage = $"복사 실패: {ex.Message}";
-            }
+                Sender = MessageSender.QueryResult,
+                SourceMessageId = message.Id,
+                Text = candidate.Label,
+                Sql = candidate.Sql,
+                AssetDirectory = message.AssetDirectory,
+                DbPath = message.DbPath,
+                QueryResult = result
+            };
+            if (single) message.ResultMessageId = resultMessage.Id;
+            while (++index < session.Messages.Count && session.Messages[index].SourceMessageId == message.Id) { }
+            session.Messages.Insert(index, resultMessage);
         }
 
         [RelayCommand]
         public async Task ImportJsonFileAsync(string filePath)
         {
-            if (string.IsNullOrWhiteSpace(filePath) || !File.Exists(filePath) || SelectedSession == null)
+            var session = SelectedSession;
+            if (session == null || session.IsDualMode || string.IsNullOrWhiteSpace(filePath) || !File.Exists(filePath))
             {
                 return;
             }
@@ -393,44 +516,23 @@ namespace SqlApp.ViewModels
             {
                 string json = await File.ReadAllTextAsync(filePath);
                 using var doc = JsonDocument.Parse(json);
+                if (session != SelectedSession || session.IsDualMode) return;
 
-                var questions = new List<string>();
-
-                if (doc.RootElement.ValueKind == JsonValueKind.Array)
+                var root = doc.RootElement;
+                IEnumerable<JsonElement> rows = root.ValueKind == JsonValueKind.Array ? root.EnumerateArray() : new[] { root };
+                string[] keys = ["question", "sql"];
+                foreach (var row in rows.Where(e => e.ValueKind == JsonValueKind.Object))
                 {
-                    foreach (var elem in doc.RootElement.EnumerateArray())
+                    foreach (var key in keys)
                     {
-                        if (elem.TryGetProperty("question", out var q) && !string.IsNullOrWhiteSpace(q.GetString()))
-                        {
-                            questions.Add(q.GetString()!);
-                        }
-                        else if (elem.TryGetProperty("sql", out var s) && !string.IsNullOrWhiteSpace(s.GetString()))
-                        {
-                            questions.Add(s.GetString()!);
-                        }
+                        if (!row.TryGetProperty(key, out var field) || field.ValueKind != JsonValueKind.String ||
+                            string.IsNullOrWhiteSpace(field.GetString())) continue;
+                        InputText = field.GetString()!;
+                        StatusMessage = "JSON 파일에서 첫 번째 입력을 불러왔습니다.";
+                        return;
                     }
                 }
-                else if (doc.RootElement.ValueKind == JsonValueKind.Object)
-                {
-                    if (doc.RootElement.TryGetProperty("question", out var q) && !string.IsNullOrWhiteSpace(q.GetString()))
-                    {
-                        questions.Add(q.GetString()!);
-                    }
-                    else if (doc.RootElement.TryGetProperty("sql", out var s) && !string.IsNullOrWhiteSpace(s.GetString()))
-                    {
-                        questions.Add(s.GetString()!);
-                    }
-                }
-
-                if (questions.Count > 0)
-                {
-                    InputText = questions[0];
-                    StatusMessage = $"JSON 파일에서 {questions.Count}개 항목 로드됨. 첫 번째 질문이 입력창에 배치되었습니다.";
-                }
-                else
-                {
-                    StatusMessage = "JSON 파일에서 question 또는 sql 키를 찾지 못했습니다.";
-                }
+                StatusMessage = $"JSON 파일에 {string.Join(", ", keys)} 입력이 없습니다.";
             }
             catch (Exception ex)
             {

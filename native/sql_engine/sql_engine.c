@@ -1,15 +1,13 @@
-/* Standalone capstone_sql F32 GGUF engine; no external runtime libraries.
- * Each generation step recomputes the full prefix; there is no KV cache yet.
- */
+/* capstone_sql F32 decoder for token IDs, with a per-generation KV cache. */
+#if !defined(_WIN32) && !defined(_POSIX_C_SOURCE)
+#define _POSIX_C_SOURCE 200809L
+#endif
 #include "sql_engine.h"
-#include <ctype.h>
-#include <errno.h>
-#include <limits.h>
 #include <math.h>
-#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #define GGUF_VERSION 3
 #define CONTRACT_VERSION 2
@@ -25,12 +23,6 @@ typedef struct {
 } Tensor;
 
 typedef struct {
-    uint32_t left_token_id;
-    uint32_t right_token_id;
-    uint32_t merged_token_id;
-} BpeMerge;
-
-typedef struct {
     int vocab_size;
     int embedding_dim;
     int layer_count;
@@ -41,26 +33,10 @@ typedef struct {
     float rope_theta;
 } ModelConfig;
 
-typedef struct {
-    char **seed_tokens;
-    size_t seed_count;
-    uint32_t pad_id;
-    uint32_t bos_id;
-    uint32_t eos_id;
-    uint32_t sep_id;
-    uint32_t seed_base;
-    uint32_t merge_base;
-    BpeMerge *merges;
-    size_t merge_count;
-    unsigned char **token_bytes;
-    size_t *token_byte_lengths;
-} Tokenizer;
-
 typedef struct SqlModel {
     ModelConfig config;
     Tensor *tensors;
     size_t tensor_count;
-    Tokenizer tokenizer;
 } Model;
 
 #define MAX_ALLOCATION_BYTES ((size_t)1024 * 1024 * 1024)
@@ -69,10 +45,8 @@ typedef struct SqlModel {
 #define MAX_LAYERS 256
 #define MAX_CONTEXT_LENGTH 4096
 #define MAX_TENSOR_COUNT 10000
-#define MAX_MERGE_ARRAY_ENTRIES 393216
 #define GGUF_ALIGNMENT 32
-#define REQUIRED_METADATA_COUNT 19
-#define BYTE_TOKEN_COUNT 256
+#define MAX_METADATA_COUNT 1024
 
 typedef enum {
     GGUF_UINT32 = 4,
@@ -85,13 +59,10 @@ typedef enum {
     METADATA_ARCHITECTURE = 1u << 0,
     METADATA_ALIGNMENT = 1u << 1,
     METADATA_CONTRACT_VERSION = 1u << 2,
-    METADATA_SEEDS = 1u << 3,
-    METADATA_MERGES = 1u << 4,
-    METADATA_EPSILON = 1u << 5,
-    METADATA_ROPE_THETA = 1u << 6,
-    METADATA_FIRST_DIMENSION = 1u << 7,
-    METADATA_FIRST_TOKENIZER_ID = 1u << 13,
-    METADATA_ALL_FIELDS = (1u << REQUIRED_METADATA_COUNT) - 1
+    METADATA_EPSILON = 1u << 3,
+    METADATA_ROPE_THETA = 1u << 4,
+    METADATA_FIRST_DIMENSION = 1u << 5,
+    METADATA_COMPUTE_FIELDS = (1u << 11) - 1
 } MetadataField;
 
 typedef struct {
@@ -112,12 +83,14 @@ typedef struct {
 } InferenceWorkspace;
 
 typedef struct {
+    const float *attention_norm;
+    const float *qkv;
     const float *attention_output;
     const float *ffn_norm;
     const float *ffn_gate;
     const float *ffn_up;
     const float *ffn_down;
-} BlockResidualWeights;
+} DecoderWeights;
 
 /* ------------------------- Memory and binary reading ---------------------- */
 
@@ -182,7 +155,7 @@ static void fail(const char *message) {
     exit(1);
 }
 
-/* Allocations made while decoding an untrusted model or generating tokens
+/* Allocations made while loading a model or computing logits
  * are linked until the call succeeds. Error unwinding also frees temporaries
  * that have not yet been installed in a model/workspace. */
 typedef struct Allocation {
@@ -334,15 +307,6 @@ static BinaryReader read_model_file(const char *path) {
 
 /* ---------------------------- Named validation --------------------------- */
 
-static int string_already_present(char **strings, size_t count, const char *text) {
-    for (size_t index = 0; index < count; index++) {
-        if (!strcmp(strings[index], text)) {
-            return 1;
-        }
-    }
-    return 0;
-}
-
 static int has_expected_tensor_shape(const Tensor *tensor, const char *name,
                                      size_t rows, size_t columns) {
     int is_norm_vector = strstr(name, "norm.weight") != NULL;
@@ -355,8 +319,7 @@ static int has_expected_tensor_shape(const Tensor *tensor, const char *name,
 static int is_model_config_compatible(const ModelConfig *config, unsigned seen_fields) {
     /* Check completeness first: missing heads must not cause division by zero.
      * Present dimensions have already been validated as positive. */
-    return seen_fields == METADATA_ALL_FIELDS &&
-           config->vocab_size >= BYTE_TOKEN_COUNT &&
+    return seen_fields == METADATA_COMPUTE_FIELDS && config->vocab_size >= 256 &&
            config->embedding_dim % config->head_count == 0 &&
            (config->embedding_dim / config->head_count) % 2 == 0 &&
            config->layer_count <= MAX_LAYERS &&
@@ -375,18 +338,6 @@ static int tensor_data_overlaps(const Tensor *tensor, size_t byte_count,
                                 const Tensor *previous) {
     return tensor->data_offset < previous->data_offset + previous->element_count * 4 &&
            previous->data_offset < tensor->data_offset + byte_count;
-}
-
-static int has_valid_merge_references(const Model *model, BpeMerge merge,
-                                      size_t merge_index) {
-    /* Validate IDs before indexing token_bytes. A merge can only use already
-     * reconstructed tokens, never itself or a future merge. */
-    return merge.merged_token_id == model->tokenizer.merge_base + merge_index &&
-           merge.merged_token_id < (uint32_t)model->config.vocab_size &&
-           merge.left_token_id < merge.merged_token_id &&
-           merge.right_token_id < merge.merged_token_id &&
-           model->tokenizer.token_bytes[merge.left_token_id] &&
-           model->tokenizer.token_bytes[merge.right_token_id];
 }
 
 static int has_duplicate_tensor_name(const Model *model, size_t tensor_index) {
@@ -432,8 +383,7 @@ static size_t read_gguf_header(BinaryReader *reader, Model *model) {
     }
     uint64_t tensor_count = read_uint64(reader);
     uint64_t metadata_count = read_uint64(reader);
-    if (tensor_count > MAX_TENSOR_COUNT ||
-        (metadata_count != REQUIRED_METADATA_COUNT && metadata_count != 13)) {
+    if (tensor_count > MAX_TENSOR_COUNT || metadata_count > MAX_METADATA_COUNT) {
         fail("unsupported GGUF metadata contract");
     }
     model->tensor_count = (size_t)tensor_count;
@@ -460,60 +410,29 @@ static void read_architecture_metadata(BinaryReader *reader, uint32_t type) {
     free_array(architecture);
 }
 
-static void read_seed_metadata(BinaryReader *reader, uint32_t type,
-                               Tokenizer *tokenizer) {
-    if (type != GGUF_ARRAY || read_uint32(reader) != GGUF_STRING) {
-        fail("seeds must be string array");
+/* Managed code owns the tokenizer. Only traverse the serialized metadata to
+ * locate the tensor descriptors, without allocating any token data. */
+static void skip_tokenizer_metadata(BinaryReader *reader, uint32_t type) {
+    uint64_t count = 1;
+    if (type == GGUF_ARRAY) {
+        type = read_uint32(reader);
+        count = read_uint64(reader);
     }
-    uint64_t seed_count = read_uint64(reader);
-    if (seed_count > MAX_DIMENSION) {
-        fail("too many seed tokens");
-    }
-    tokenizer->seed_count = (size_t)seed_count;
-    tokenizer->seed_tokens = allocate_array(tokenizer->seed_count, sizeof(char *));
-    for (size_t index = 0; index < tokenizer->seed_count; index++) {
-        char *seed = read_string(reader);
-        tokenizer->seed_tokens[index] = seed;
-        if (strlen(seed) < 2) {
-            fail("invalid seed");
+    if (type == GGUF_UINT32) {
+        if (count > (reader->size - reader->position) / 4) {
+            fail("truncated metadata");
         }
-        size_t length = strlen(seed);
-        if (isspace((unsigned char)seed[0]) ||
-            isspace((unsigned char)seed[length - 1])) {
-            fail("invalid seed whitespace");
-        }
-        for (size_t byte = 0; byte < length; byte++) {
-            if ((unsigned char)seed[byte] >= 128) {
-                fail("ASCII seed tokens required");
+        read_bytes(reader, (size_t)count * 4);
+    } else if (type == GGUF_STRING) {
+        for (uint64_t i = 0; i < count; ++i) {
+            uint64_t length = read_uint64(reader);
+            if (length > reader->size - reader->position) {
+                fail("truncated metadata string");
             }
+            read_bytes(reader, (size_t)length);
         }
-        if (string_already_present(tokenizer->seed_tokens, index, seed)) {
-            fail("duplicate seed");
-        }
-    }
-}
-
-static int is_valid_merge_array_length(uint64_t entry_count) {
-    return entry_count % 3 == 0 && entry_count <= MAX_MERGE_ARRAY_ENTRIES;
-}
-
-static void read_merge_metadata(BinaryReader *reader, uint32_t type,
-                                Tokenizer *tokenizer) {
-    if (type != GGUF_ARRAY || read_uint32(reader) != GGUF_UINT32) {
-        fail("merges must be uint32 array");
-    }
-    uint64_t entry_count = read_uint64(reader);
-    if (!is_valid_merge_array_length(entry_count)) {
-        fail("invalid merges length");
-    }
-    /* The GGUF array is flattened as [left, right, merged_id, ...]. */
-    tokenizer->merge_count = (size_t)entry_count / 3;
-    tokenizer->merges = allocate_array(tokenizer->merge_count, sizeof(BpeMerge));
-    for (size_t index = 0; index < tokenizer->merge_count; index++) {
-        BpeMerge *merge = &tokenizer->merges[index];
-        merge->left_token_id = read_uint32(reader);
-        merge->right_token_id = read_uint32(reader);
-        merge->merged_token_id = read_uint32(reader);
+    } else {
+        fail("unsupported metadata type");
     }
 }
 
@@ -555,57 +474,6 @@ static unsigned read_dimension_metadata(BinaryReader *reader, ModelConfig *confi
     return 0;
 }
 
-static unsigned read_tokenizer_id_metadata(BinaryReader *reader, Tokenizer *tokenizer,
-                                           const char *key, uint32_t type) {
-    const char *names[] = {"pad_id", "bos_id",    "eos_id",
-                           "sep_id", "seed_base", "merge_base"};
-    uint32_t *destinations[] = {&tokenizer->pad_id,    &tokenizer->bos_id,
-                                &tokenizer->eos_id,    &tokenizer->sep_id,
-                                &tokenizer->seed_base, &tokenizer->merge_base};
-    for (int index = 0; index < 6; index++) {
-        char metadata_name[64];
-        snprintf(metadata_name, sizeof(metadata_name), "capstone_sql.tokenizer.%s",
-                 names[index]);
-        if (!strcmp(key, metadata_name)) {
-            if (type != GGUF_UINT32) {
-                fail("expected uint32 tokenizer ID");
-            }
-            *destinations[index] = read_uint32(reader);
-            return METADATA_FIRST_TOKENIZER_ID << index;
-        }
-    }
-    fail("unsupported metadata key");
-    return 0;
-}
-
-static int has_valid_tokenizer_layout(const Tokenizer *tokenizer, int vocab_size) {
-    /* Validate ranges before building pieces or indexing the vocabulary.
-     * Byte IDs remain 0..255 by definition of this byte-level BPE contract. */
-    if (tokenizer->seed_base < BYTE_TOKEN_COUNT ||
-        tokenizer->merge_base < tokenizer->seed_base ||
-        tokenizer->merge_base > (uint32_t)vocab_size ||
-        tokenizer->seed_count > tokenizer->merge_base - tokenizer->seed_base ||
-        tokenizer->merge_count > (uint32_t)vocab_size - tokenizer->merge_base) {
-        return 0;
-    }
-    const uint32_t special_ids[] = {tokenizer->pad_id, tokenizer->bos_id,
-                                    tokenizer->eos_id, tokenizer->sep_id};
-    for (size_t index = 0; index < 4; index++) {
-        uint32_t id = special_ids[index];
-        if (id < BYTE_TOKEN_COUNT || id >= tokenizer->merge_base ||
-            (id >= tokenizer->seed_base &&
-             id - tokenizer->seed_base < tokenizer->seed_count)) {
-            return 0;
-        }
-        for (size_t previous = 0; previous < index; previous++) {
-            if (id == special_ids[previous]) {
-                return 0;
-            }
-        }
-    }
-    return 1;
-}
-
 static unsigned read_metadata_entry(BinaryReader *reader, Model *model, const char *key,
                                     uint32_t type) {
     if (!strcmp(key, "general.architecture")) {
@@ -622,14 +490,6 @@ static unsigned read_metadata_entry(BinaryReader *reader, Model *model, const ch
                              "version " CONTRACT_VERSION_TEXT);
         return METADATA_CONTRACT_VERSION;
     }
-    if (!strcmp(key, "capstone_sql.tokenizer.seeds")) {
-        read_seed_metadata(reader, type, &model->tokenizer);
-        return METADATA_SEEDS;
-    }
-    if (!strcmp(key, "capstone_sql.tokenizer.merges")) {
-        read_merge_metadata(reader, type, &model->tokenizer);
-        return METADATA_MERGES;
-    }
     if (!strcmp(key, "capstone_sql.eps")) {
         model->config.norm_epsilon = read_positive_float_metadata(reader, type);
         return METADATA_EPSILON;
@@ -639,32 +499,27 @@ static unsigned read_metadata_entry(BinaryReader *reader, Model *model, const ch
         return METADATA_ROPE_THETA;
     }
     if (!strncmp(key, "capstone_sql.tokenizer.", 23)) {
-        return read_tokenizer_id_metadata(reader, &model->tokenizer, key, type);
+        skip_tokenizer_metadata(reader, type);
+        return 0;
     }
     return read_dimension_metadata(reader, &model->config, key, type);
 }
 
 static void read_model_metadata(BinaryReader *reader, Model *model,
                                 size_t metadata_count) {
-    char *keys[REQUIRED_METADATA_COUNT] = {0};
     unsigned seen_fields = 0;
     for (size_t index = 0; index < metadata_count; index++) {
         char *key = read_string(reader);
-        keys[index] = key;
-        if (string_already_present(keys, index, key)) {
-            fail("duplicate metadata key");
-        }
         uint32_t type = read_uint32(reader);
-        seen_fields |= read_metadata_entry(reader, model, key, type);
-    }
-    for (size_t index = 0; index < metadata_count; index++) {
-        free_array(keys[index]);
+        unsigned field = read_metadata_entry(reader, model, key, type);
+        if (seen_fields & field) {
+            fail("duplicate compute metadata key");
+        }
+        seen_fields |= field;
+        free_array(key);
     }
     if (!is_model_config_compatible(&model->config, seen_fields)) {
         fail("incomplete or incompatible config");
-    }
-    if (!has_valid_tokenizer_layout(&model->tokenizer, model->config.vocab_size)) {
-        fail("invalid tokenizer layout");
     }
     /* Embedding, final norm, output head, and seven tensors per decoder block. */
     if (model->tensor_count != (size_t)(3 + 7 * model->config.layer_count)) {
@@ -672,7 +527,7 @@ static void read_model_metadata(BinaryReader *reader, Model *model,
     }
 }
 
-/* ----------------------- Tensor loading and token pieces ------------------ */
+/* ----------------------- Tensor loading ------------------ */
 
 static void read_tensor_shape_and_offset(BinaryReader *reader, Tensor *tensor) {
     tensor->rank = read_uint32(reader);
@@ -764,58 +619,6 @@ static void validate_model_weights(const Model *model) {
     }
 }
 
-static void build_byte_token_pieces(Tokenizer *tokenizer) {
-    for (int token_id = 0; token_id < BYTE_TOKEN_COUNT; token_id++) {
-        tokenizer->token_bytes[token_id] = allocate_array(1, 1);
-        tokenizer->token_bytes[token_id][0] = (unsigned char)token_id;
-        tokenizer->token_byte_lengths[token_id] = 1;
-    }
-}
-
-static void build_seed_token_pieces(Tokenizer *tokenizer) {
-    for (size_t index = 0; index < tokenizer->seed_count; index++) {
-        size_t byte_count = strlen(tokenizer->seed_tokens[index]);
-        size_t token_id = tokenizer->seed_base + index;
-        tokenizer->token_bytes[token_id] = allocate_array(byte_count, 1);
-        memcpy(tokenizer->token_bytes[token_id], tokenizer->seed_tokens[index],
-               byte_count);
-        tokenizer->token_byte_lengths[token_id] = byte_count;
-    }
-}
-
-static void build_merged_token_piece(Model *model, size_t merge_index) {
-    Tokenizer *tokenizer = &model->tokenizer;
-    BpeMerge merge = tokenizer->merges[merge_index];
-    if (!has_valid_merge_references(model, merge, merge_index)) {
-        fail("invalid merge references");
-    }
-    size_t left_length = tokenizer->token_byte_lengths[merge.left_token_id];
-    size_t right_length = tokenizer->token_byte_lengths[merge.right_token_id];
-    size_t merged_length = left_length + right_length;
-    if (merged_length > MAX_STRING_BYTES) {
-        fail("merged token too large");
-    }
-    unsigned char *merged_bytes = allocate_array(merged_length, 1);
-    tokenizer->token_bytes[merge.merged_token_id] = merged_bytes;
-    tokenizer->token_byte_lengths[merge.merged_token_id] = merged_length;
-    memcpy(merged_bytes, tokenizer->token_bytes[merge.left_token_id], left_length);
-    memcpy(merged_bytes + left_length, tokenizer->token_bytes[merge.right_token_id],
-           right_length);
-}
-
-static void build_token_pieces(Model *model) {
-    Tokenizer *tokenizer = &model->tokenizer;
-    tokenizer->token_bytes =
-        allocate_array(model->config.vocab_size, sizeof(unsigned char *));
-    tokenizer->token_byte_lengths =
-        allocate_array(model->config.vocab_size, sizeof(size_t));
-    build_byte_token_pieces(tokenizer);
-    build_seed_token_pieces(tokenizer);
-    for (size_t index = 0; index < tokenizer->merge_count; index++) {
-        build_merged_token_piece(model, index);
-    }
-}
-
 SQL_API Model *sql_model_open(const char *path) {
     sql_set_last_error(NULL);
     if (!path || !*path) {
@@ -837,7 +640,6 @@ SQL_API Model *sql_model_open(const char *path) {
     free_array(reader.data);
     reader.data = NULL;
     validate_model_weights(model);
-    build_token_pieces(model);
 
     finish_call(1);
     return model;
@@ -868,7 +670,8 @@ static void apply_rms_norm(float *output, const float *input, const float *weigh
     }
 }
 
-static InferenceWorkspace create_workspace(const ModelConfig *config, int token_count) {
+static InferenceWorkspace create_workspace(const ModelConfig *config, int token_count,
+                                           int attention_capacity) {
     size_t state_count = checked_product((size_t)token_count, config->embedding_dim);
     InferenceWorkspace workspace = {0};
     workspace.hidden_states = allocate_array(state_count, sizeof(float));
@@ -879,7 +682,7 @@ static InferenceWorkspace create_workspace(const ModelConfig *config, int token_
     workspace.temporary_vector = allocate_array(config->embedding_dim, sizeof(float));
     workspace.ffn_gate = allocate_array(config->ffn_dim, sizeof(float));
     workspace.ffn_up = allocate_array(config->ffn_dim, sizeof(float));
-    workspace.attention_scores = allocate_array(token_count, sizeof(float));
+    workspace.attention_scores = allocate_array(attention_capacity, sizeof(float));
     return workspace;
 }
 
@@ -894,7 +697,7 @@ static void release_workspace(InferenceWorkspace *workspace) {
     free_array(workspace->attention_scores);
 }
 
-static void copy_token_embeddings(const Model *model, const int *token_ids,
+static void copy_token_embeddings(const Model *model, const int32_t *token_ids,
                                   int token_count, float *hidden_states) {
     int dimension = model->config.embedding_dim;
     const float *embeddings = get_tensor_weights(model, "embedding.embedding.weight",
@@ -933,44 +736,28 @@ static void apply_rope_to_query_and_key(float *qkv, const ModelConfig *config,
     }
 }
 
-static void compute_queries_keys_values(const Model *model, int layer_index,
-                                        int token_count,
-                                        InferenceWorkspace *workspace) {
-    int dimension = model->config.embedding_dim;
-    const float *norm_weights =
-        get_block_weights(model, layer_index, "attn_norm.weight", 1, dimension);
-    const float *qkv_weights = get_block_weights(
-        model, layer_index, "attn.qkv_proj.weight", 3 * dimension, dimension);
-    for (int position = 0; position < token_count; position++) {
-        size_t state_offset = (size_t)position * dimension;
-        float *normalized = workspace->normalized_states + state_offset;
-        float *qkv = workspace->qkv_states + state_offset * 3;
-        apply_rms_norm(normalized, workspace->hidden_states + state_offset,
-                       norm_weights, dimension, model->config.norm_epsilon);
-        linear_projection(qkv, normalized, qkv_weights, 3 * dimension, dimension);
-        apply_rope_to_query_and_key(qkv, &model->config, position);
-    }
+static void project_token_qkv(const ModelConfig *config, const DecoderWeights *weights,
+                              const float *hidden, float *normalized, float *qkv,
+                              int position) {
+    int dimension = config->embedding_dim;
+    apply_rms_norm(normalized, hidden, weights->attention_norm, dimension,
+                   config->norm_epsilon);
+    linear_projection(qkv, normalized, weights->qkv, 3 * dimension, dimension);
+    apply_rope_to_query_and_key(qkv, config, position);
 }
 
-static float compute_attention_scores(const ModelConfig *config,
-                                      InferenceWorkspace *workspace, int query_position,
-                                      int head_index) {
-    int dimension = config->embedding_dim;
-    int head_dim = dimension / config->head_count;
+static float compute_attention_scores(float *scores, const float *query,
+                                      const float *keys, int key_count,
+                                      size_t kv_stride, int head_dim) {
     float maximum_score = -INFINITY;
-    const float *query = workspace->qkv_states +
-                         (size_t)query_position * 3 * dimension + head_index * head_dim;
-    /* Keys at positions <= query_position implement the causal mask. */
-    for (int key_position = 0; key_position <= query_position; key_position++) {
-        const float *key = workspace->qkv_states +
-                           (size_t)key_position * 3 * dimension + dimension +
-                           head_index * head_dim;
+    for (int key_position = 0; key_position < key_count; key_position++) {
+        const float *key = keys + (size_t)key_position * kv_stride;
         float dot_product = 0;
         for (int index = 0; index < head_dim; index++) {
             dot_product += query[index] * key[index];
         }
         float score = dot_product / sqrtf((float)head_dim);
-        workspace->attention_scores[key_position] = score;
+        scores[key_position] = score;
         if (score > maximum_score) {
             maximum_score = score;
         }
@@ -990,37 +777,32 @@ static float exponentiate_attention_scores(float *scores, int score_count,
     return denominator;
 }
 
-static void accumulate_attention_values(const ModelConfig *config,
-                                        InferenceWorkspace *workspace,
-                                        int query_position, int head_index,
+static void accumulate_attention_values(float *output, const float *scores,
+                                        const float *values, int key_count,
+                                        size_t kv_stride, int head_dim,
                                         float denominator) {
-    int dimension = config->embedding_dim;
-    int head_dim = dimension / config->head_count;
-    float *output = workspace->attention_output + (size_t)query_position * dimension +
-                    head_index * head_dim;
-    for (int value_position = 0; value_position <= query_position; value_position++) {
-        const float *value = workspace->qkv_states +
-                             (size_t)value_position * 3 * dimension + 2 * dimension +
-                             head_index * head_dim;
+    for (int value_position = 0; value_position < key_count; value_position++) {
+        const float *value = values + (size_t)value_position * kv_stride;
         for (int index = 0; index < head_dim; index++) {
-            output[index] += workspace->attention_scores[value_position] / denominator *
-                             value[index];
+            output[index] += scores[value_position] / denominator * value[index];
         }
     }
 }
 
-static void compute_causal_attention(const ModelConfig *config, int token_count,
-                                     InferenceWorkspace *workspace) {
-    size_t state_count = checked_product((size_t)token_count, config->embedding_dim);
-    memset(workspace->attention_output, 0, state_count * sizeof(float));
-    for (int position = 0; position < token_count; position++) {
-        for (int head = 0; head < config->head_count; head++) {
-            float maximum_score =
-                compute_attention_scores(config, workspace, position, head);
-            float denominator = exponentiate_attention_scores(
-                workspace->attention_scores, position + 1, maximum_score);
-            accumulate_attention_values(config, workspace, position, head, denominator);
-        }
+/* kv_stride spans Q/K/V in the reference pass or just K/V in the cache.
+ * Only the prefix through the query position participates in causal attention. */
+static void attend_to_prefix(const ModelConfig *config, const float *query,
+                             const float *keys, const float *values, int key_count,
+                             size_t kv_stride, float *scores, float *output) {
+    int head_dim = config->embedding_dim / config->head_count;
+    memset(output, 0, (size_t)config->embedding_dim * sizeof(float));
+    for (int head = 0; head < config->head_count; head++) {
+        int offset = head * head_dim;
+        float maximum = compute_attention_scores(scores, query + offset, keys + offset,
+                                                 key_count, kv_stride, head_dim);
+        float denominator = exponentiate_attention_scores(scores, key_count, maximum);
+        accumulate_attention_values(output + offset, scores, values + offset, key_count,
+                                    kv_stride, head_dim, denominator);
     }
 }
 
@@ -1037,11 +819,14 @@ static void apply_swiglu(float *gate, const float *up, int ffn_dim) {
     }
 }
 
-static BlockResidualWeights get_block_residual_weights(const Model *model,
-                                                       int layer_index) {
+static DecoderWeights get_decoder_weights(const Model *model, int layer_index) {
     int dimension = model->config.embedding_dim;
     int ffn_dim = model->config.ffn_dim;
-    BlockResidualWeights weights = {0};
+    DecoderWeights weights = {0};
+    weights.attention_norm =
+        get_block_weights(model, layer_index, "attn_norm.weight", 1, dimension);
+    weights.qkv = get_block_weights(model, layer_index, "attn.qkv_proj.weight",
+                                    3 * dimension, dimension);
     weights.attention_output = get_block_weights(
         model, layer_index, "attn.out_proj.weight", dimension, dimension);
     weights.ffn_norm =
@@ -1056,7 +841,7 @@ static BlockResidualWeights get_block_residual_weights(const Model *model,
 }
 
 static void apply_attention_residual(const ModelConfig *config,
-                                     const BlockResidualWeights *weights, int position,
+                                     const DecoderWeights *weights, int position,
                                      InferenceWorkspace *workspace) {
     int dimension = config->embedding_dim;
     size_t offset = (size_t)position * dimension;
@@ -1066,9 +851,8 @@ static void apply_attention_residual(const ModelConfig *config,
                  dimension);
 }
 
-static void apply_ffn_residual(const ModelConfig *config,
-                               const BlockResidualWeights *weights, int position,
-                               InferenceWorkspace *workspace) {
+static void apply_ffn_residual(const ModelConfig *config, const DecoderWeights *weights,
+                               int position, InferenceWorkspace *workspace) {
     int dimension = config->embedding_dim;
     int ffn_dim = config->ffn_dim;
     float *hidden_state = workspace->hidden_states + (size_t)position * dimension;
@@ -1085,24 +869,31 @@ static void apply_ffn_residual(const ModelConfig *config,
     add_residual(hidden_state, temporary, dimension);
 }
 
-static void apply_block_residuals(const Model *model, int layer_index, int token_count,
-                                  InferenceWorkspace *workspace) {
-    BlockResidualWeights weights = get_block_residual_weights(model, layer_index);
+static void run_decoder_block(const Model *model, int layer_index, int token_count,
+                              InferenceWorkspace *workspace) {
+    const ModelConfig *config = &model->config;
+    int dimension = config->embedding_dim;
+    DecoderWeights weights = get_decoder_weights(model, layer_index);
     for (int position = 0; position < token_count; position++) {
-        apply_attention_residual(&model->config, &weights, position, workspace);
-        apply_ffn_residual(&model->config, &weights, position, workspace);
+        size_t offset = (size_t)position * dimension;
+        project_token_qkv(config, &weights, workspace->hidden_states + offset,
+                          workspace->normalized_states + offset,
+                          workspace->qkv_states + 3 * offset, position);
+    }
+    for (int position = 0; position < token_count; position++) {
+        size_t offset = (size_t)position * dimension;
+        attend_to_prefix(config, workspace->qkv_states + 3 * offset,
+                         workspace->qkv_states + dimension,
+                         workspace->qkv_states + 2 * dimension, position + 1,
+                         3 * dimension, workspace->attention_scores,
+                         workspace->attention_output + offset);
+        apply_attention_residual(config, &weights, position, workspace);
+        apply_ffn_residual(config, &weights, position, workspace);
     }
 }
 
-static void run_decoder_block(const Model *model, int layer_index, int token_count,
-                              InferenceWorkspace *workspace) {
-    compute_queries_keys_values(model, layer_index, token_count, workspace);
-    compute_causal_attention(&model->config, token_count, workspace);
-    apply_block_residuals(model, layer_index, token_count, workspace);
-}
-
-static float *compute_last_token_logits(const Model *model, int token_count,
-                                        InferenceWorkspace *workspace) {
+static void compute_last_token_logits(const Model *model, int token_count,
+                                      InferenceWorkspace *workspace, float *logits) {
     int dimension = model->config.embedding_dim;
     int vocab_size = model->config.vocab_size;
     const float *norm_weights =
@@ -1113,7 +904,6 @@ static float *compute_last_token_logits(const Model *model, int token_count,
         workspace->hidden_states + (size_t)(token_count - 1) * dimension;
     apply_rms_norm(workspace->temporary_vector, last_state, norm_weights, dimension,
                    model->config.norm_epsilon);
-    float *logits = allocate_array(vocab_size, sizeof(float));
     linear_projection(logits, workspace->temporary_vector, output_weights, vocab_size,
                       dimension);
     for (int token_id = 0; token_id < vocab_size; token_id++) {
@@ -1121,260 +911,158 @@ static float *compute_last_token_logits(const Model *model, int token_count,
             fail("non-finite logits");
         }
     }
-    return logits;
 }
 
-static float *forward(const Model *model, const int *token_ids, int token_count) {
-    InferenceWorkspace workspace = create_workspace(&model->config, token_count);
+/* One independent cache per sentence. Each row stores the rotated key then
+ * the unrotated value for a single layer and absolute token position. */
+typedef struct {
+    DecoderWeights weights;
+    float *rows;
+} KvLayer;
+
+typedef struct {
+    int length;
+    int capacity;
+    int reserved;
+    int layer_count;
+    KvLayer *layers;
+    InferenceWorkspace workspace;
+} KvCache;
+
+static KvCache create_kv_cache(const Model *model, int capacity) {
+    const ModelConfig *config = &model->config;
+    if (capacity < 1 || capacity > config->context_length) {
+        fail("KV capacity outside model context");
+    }
+    KvCache cache = {0};
+    cache.capacity = capacity;
+    cache.layer_count = config->layer_count;
+    cache.layers = allocate_array(config->layer_count, sizeof(*cache.layers));
+    for (int layer = 0; layer < config->layer_count; layer++) {
+        cache.layers[layer].weights = get_decoder_weights(model, layer);
+    }
+    cache.workspace = create_workspace(config, 1, capacity);
+    return cache;
+}
+
+static void release_kv_cache(KvCache *cache) {
+    release_workspace(&cache->workspace);
+    for (int layer = 0; layer < cache->layer_count; layer++) {
+        free_array(cache->layers[layer].rows);
+    }
+    free_array(cache->layers);
+}
+
+/* Grow on demand, so an early EOS does not reserve an entire context for
+ * every layer. Individual layer buffers obey the allocator's size limit. */
+static void grow_kv_cache(KvCache *cache, size_t stride) {
+    int reserved = cache->reserved ? cache->reserved * 2 : 16;
+    if (reserved > cache->capacity) {
+        reserved = cache->capacity;
+    }
+    size_t elements = checked_product(reserved, stride);
+    for (int i = 0; i < cache->layer_count; i++) {
+        KvLayer *layer = &cache->layers[i];
+        float *rows = allocate_array(elements, sizeof(*rows));
+        if (layer->rows) {
+            memcpy(rows, layer->rows, cache->length * stride * sizeof(*rows));
+            free_array(layer->rows);
+        }
+        layer->rows = rows;
+    }
+    cache->reserved = reserved;
+}
+
+static void cached_forward_token(const Model *model, KvCache *cache, int32_t token_id,
+                                 float *logits) {
+    int position = cache->length;
+    if (position >= cache->capacity) {
+        fail("KV cache is full");
+    }
+    const ModelConfig *config = &model->config;
+    int dimension = config->embedding_dim;
+    size_t stride = 2 * (size_t)dimension;
+    if (position == cache->reserved) {
+        grow_kv_cache(cache, stride);
+    }
+    InferenceWorkspace *workspace = &cache->workspace;
+    copy_token_embeddings(model, &token_id, 1, workspace->hidden_states);
+    for (int layer = 0; layer < config->layer_count; layer++) {
+        const DecoderWeights *weights = &cache->layers[layer].weights;
+        float *kv = cache->layers[layer].rows;
+        project_token_qkv(config, weights, workspace->hidden_states,
+                          workspace->normalized_states, workspace->qkv_states,
+                          position);
+        memcpy(kv + (size_t)position * stride, workspace->qkv_states + dimension,
+               stride * sizeof(float));
+        attend_to_prefix(config, workspace->qkv_states, kv, kv + dimension,
+                         position + 1, stride, workspace->attention_scores,
+                         workspace->attention_output);
+        apply_attention_residual(config, weights, 0, workspace);
+        apply_ffn_residual(config, weights, 0, workspace);
+    }
+    cache->length++;
+    if (logits) {
+        compute_last_token_logits(model, 1, workspace, logits);
+    }
+}
+
+/* Monotonic elapsed wall time includes the forward workspace and decoder.
+ * It excludes model loading, interop, and all caller-side text processing. */
+static double monotonic_milliseconds(void) {
+#if defined(_WIN32)
+    LARGE_INTEGER ticks, frequency;
+    if (!QueryPerformanceFrequency(&frequency) || !QueryPerformanceCounter(&ticks)) {
+        fail("cannot read performance counter");
+    }
+    return (double)ticks.QuadPart * 1000.0 / (double)frequency.QuadPart;
+#else
+    struct timespec time;
+    if (clock_gettime(CLOCK_MONOTONIC, &time) != 0) {
+        fail("cannot read monotonic clock");
+    }
+    return (double)time.tv_sec * 1000.0 + (double)time.tv_nsec / 1000000.0;
+#endif
+}
+
+SQL_API int sql_model_forward(const Model *model, const int32_t *token_ids,
+                              int32_t token_count, float *logits,
+                              int32_t logits_capacity, double *elapsed_ms) {
+    sql_set_last_error(NULL);
+    if (elapsed_ms) {
+        *elapsed_ms = 0;
+    }
+    if (!model || !token_ids || !logits || !elapsed_ms) {
+        sql_set_last_error("invalid forward arguments");
+        return 0;
+    }
+    if (token_count <= 0 || token_count > model->config.context_length) {
+        sql_set_last_error("token count outside model context");
+        return 0;
+    }
+    if (logits_capacity < model->config.vocab_size) {
+        sql_set_last_error("logits buffer is smaller than vocabulary");
+        return 0;
+    }
+
+    jmp_buf bailout;
+    s_current_bailout = &bailout;
+    if (setjmp(bailout)) {
+        finish_call(0);
+        return 0;
+    }
+    double start_ms = monotonic_milliseconds();
+    InferenceWorkspace workspace =
+        create_workspace(&model->config, token_count, token_count);
     copy_token_embeddings(model, token_ids, token_count, workspace.hidden_states);
     for (int layer = 0; layer < model->config.layer_count; layer++) {
         run_decoder_block(model, layer, token_count, &workspace);
     }
-    float *logits = compute_last_token_logits(model, token_count, &workspace);
+    compute_last_token_logits(model, token_count, &workspace, logits);
     release_workspace(&workspace);
-    return logits;
-}
-
-/* ----------------------------- BPE tokenization -------------------------- */
-
-static int is_word_character(unsigned char character) {
-    return isalnum(character) || character == '_';
-}
-
-static void append_token_id(int *token_ids, int *token_count, int capacity,
-                            int token_id) {
-    if (*token_count >= capacity) {
-        fail("context length exceeded");
-    }
-    token_ids[(*token_count)++] = token_id;
-}
-
-static void validate_ascii_text(const char *text, const char *error_message) {
-    for (size_t position = 0; text[position]; position++) {
-        if ((unsigned char)text[position] >= 128) {
-            fail(error_message);
-        }
-    }
-}
-
-static int is_better_seed_match(const char *text, size_t text_length, size_t position,
-                                const char *seed, size_t seed_length,
-                                size_t best_length) {
-    /* Match whole words: the seed 'stock' must not consume 'stockholm'. */
-    return seed_length <= text_length - position && seed_length > best_length &&
-           (!position || !is_word_character((unsigned char)text[position - 1])) &&
-           (position + seed_length == text_length ||
-            !is_word_character((unsigned char)text[position + seed_length])) &&
-           !memcmp(text + position, seed, seed_length);
-}
-
-static int find_longest_seed(const Tokenizer *tokenizer, const char *text,
-                             size_t text_length, size_t position,
-                             size_t *matched_length) {
-    size_t best_length = 0;
-    int best_seed = -1;
-    for (size_t index = 0; index < tokenizer->seed_count; index++) {
-        const char *seed = tokenizer->seed_tokens[index];
-        size_t seed_length = strlen(seed);
-        if (is_better_seed_match(text, text_length, position, seed, seed_length,
-                                 best_length)) {
-            best_length = seed_length;
-            best_seed = (int)index;
-        }
-    }
-    *matched_length = best_length;
-    return best_seed;
-}
-
-static size_t find_piece_end(const char *text, size_t text_length, size_t position) {
-    size_t end = position + 1;
-    /* The ASCII pre-tokenizer groups letters; numbers and punctuation stay
-     * one byte each. BPE never crosses these piece boundaries. */
-    if (isalpha((unsigned char)text[position])) {
-        while (end < text_length && isalpha((unsigned char)text[end])) {
-            end++;
-        }
-    }
-    return end;
-}
-
-static int find_seed_for_complete_piece(const Tokenizer *tokenizer, const char *text,
-                                        size_t start, size_t end) {
-    /* Python also looks up SEED_TO_ID after regex splitting. Thus 'stock_' has
-     * a letter piece 'stock' mapped to a seed even though the seed regex's
-     * word-boundary alternative did not match the original text. */
-    for (size_t index = 0; index < tokenizer->seed_count; index++) {
-        const char *seed = tokenizer->seed_tokens[index];
-        if (strlen(seed) == end - start && !memcmp(text + start, seed, end - start)) {
-            return (int)index;
-        }
-    }
-    return -1;
-}
-
-static int matches_merge_pair(const int *piece_ids, int piece_count, int position,
-                              BpeMerge merge) {
-    return position + 1 < piece_count &&
-           piece_ids[position] == (int)merge.left_token_id &&
-           piece_ids[position + 1] == (int)merge.right_token_id;
-}
-
-static int apply_merge_to_piece(int *piece_ids, int piece_count, BpeMerge merge) {
-    int output_count = 0;
-    /* In-place compaction is safe: output never overtakes input. Skip the
-     * right token after a match to preserve non-overlapping merge pairs. */
-    for (int position = 0; position < piece_count; position++) {
-        if (matches_merge_pair(piece_ids, piece_count, position, merge)) {
-            piece_ids[output_count++] = (int)merge.merged_token_id;
-            position++;
-        } else {
-            piece_ids[output_count++] = piece_ids[position];
-        }
-    }
-    return output_count;
-}
-
-static int encode_piece(const Tokenizer *tokenizer, const char *text, size_t start,
-                        size_t end, int *piece_ids) {
-    int piece_count = (int)(end - start);
-    for (int index = 0; index < piece_count; index++) {
-        piece_ids[index] = (unsigned char)text[start + index];
-    }
-    /* Apply merges in learned rank order, not longest-substring order. */
-    for (size_t index = 0; index < tokenizer->merge_count; index++) {
-        piece_count =
-            apply_merge_to_piece(piece_ids, piece_count, tokenizer->merges[index]);
-    }
-    return piece_count;
-}
-
-static int encode_text(const Model *model, const char *text, int *token_ids,
-                       int capacity) {
-    size_t text_length = strlen(text);
-    validate_ascii_text(text, "baseline input supports ASCII English only");
-    int token_count = 0;
-    int *piece_ids = allocate_array(text_length + 1, sizeof(int));
-    for (size_t position = 0; position < text_length;) {
-        size_t seed_length = 0;
-        int seed_index = find_longest_seed(&model->tokenizer, text, text_length,
-                                           position, &seed_length);
-        if (seed_index >= 0) {
-            append_token_id(token_ids, &token_count, capacity,
-                            model->tokenizer.seed_base + seed_index);
-            position += seed_length;
-            continue;
-        }
-        size_t end = find_piece_end(text, text_length, position);
-        seed_index =
-            find_seed_for_complete_piece(&model->tokenizer, text, position, end);
-        if (seed_index >= 0) {
-            append_token_id(token_ids, &token_count, capacity,
-                            (int)model->tokenizer.seed_base + seed_index);
-            position = end;
-            continue;
-        }
-        int piece_count =
-            encode_piece(&model->tokenizer, text, position, end, piece_ids);
-        for (int index = 0; index < piece_count; index++) {
-            append_token_id(token_ids, &token_count, capacity, piece_ids[index]);
-        }
-        position = end;
-    }
-    free_array(piece_ids);
-    return token_count;
-}
-
-static char *normalize_question(const char *text) {
-    char *question = allocate_array(strlen(text) + 1, 1);
-    strcpy(question, text);
-    for (size_t position = 0; question[position]; position++) {
-        if ((unsigned char)question[position] >= 128) {
-            fail("ASCII English input required");
-        }
-        question[position] = (char)tolower((unsigned char)question[position]);
-    }
-    return question;
-}
-
-static int prepare_prompt_tokens(const Model *model, const char *text, int *token_ids) {
-    char *question = normalize_question(text);
-    int token_count = 0;
-    int capacity = model->config.context_length;
-    token_ids[token_count++] = (int)model->tokenizer.bos_id;
-    /* Reserve the final SEP slot even when the question fills the context. */
-    token_count += encode_text(model, question, token_ids + token_count,
-                               capacity - token_count - 1);
-    append_token_id(token_ids, &token_count, capacity, (int)model->tokenizer.sep_id);
-    free_array(question);
-    return token_count;
-}
-
-static int is_better_generation_candidate(const Model *model, const float *logits,
-                                          int candidate, int current) {
-    return model->tokenizer.token_bytes[candidate] &&
-           logits[candidate] > logits[current];
-}
-
-static int select_next_token(const Model *model, const float *logits) {
-    /* Start at EOS and use strict >: ties prefer EOS, then the lowest token ID.
-     * PAD/BOS/SEP and unused vocab IDs have no bytes and are not emitted. */
-    int next_token_id = (int)model->tokenizer.eos_id;
-    for (int candidate = 0; candidate < model->config.vocab_size; candidate++) {
-        if (is_better_generation_candidate(model, logits, candidate, next_token_id)) {
-            next_token_id = candidate;
-        }
-    }
-    return next_token_id;
-}
-
-/* Appends generated IDs after the prompt; printing is left to the caller so the
- * contract fixture test can check the same IDs without capturing stdout. */
-static const char *generate_tokens(const Model *model, int *token_ids, int *token_count,
-                                   int max_new_tokens) {
-    for (int step = 0; step < max_new_tokens; step++) {
-        if (*token_count >= model->config.context_length) {
-            return "context";
-        }
-        float *logits = forward(model, token_ids, *token_count);
-        int next_token_id = select_next_token(model, logits);
-        free_array(logits);
-        if (next_token_id == (int)model->tokenizer.eos_id) {
-            return "eos";
-        }
-        append_token_id(token_ids, token_count, model->config.context_length,
-                        next_token_id);
-    }
-    return "max_new_tokens";
-}
-
-static void release_tokenizer(Tokenizer *tokenizer, int vocab_size) {
-    if (!tokenizer) {
-        return;
-    }
-    if (tokenizer->seed_tokens) {
-        for (size_t index = 0; index < tokenizer->seed_count; index++) {
-            free_array(tokenizer->seed_tokens[index]);
-        }
-        free_array(tokenizer->seed_tokens);
-        tokenizer->seed_tokens = NULL;
-    }
-    tokenizer->seed_count = 0;
-    if (tokenizer->merges) {
-        free_array(tokenizer->merges);
-        tokenizer->merges = NULL;
-    }
-    tokenizer->merge_count = 0;
-    if (tokenizer->token_bytes) {
-        for (int token_id = 0; token_id < vocab_size; token_id++) {
-            free_array(tokenizer->token_bytes[token_id]);
-        }
-        free_array(tokenizer->token_bytes);
-        tokenizer->token_bytes = NULL;
-    }
-    if (tokenizer->token_byte_lengths) {
-        free_array(tokenizer->token_byte_lengths);
-        tokenizer->token_byte_lengths = NULL;
-    }
+    *elapsed_ms = monotonic_milliseconds() - start_ms;
+    finish_call(1);
+    return 1;
 }
 
 SQL_API void sql_model_close(Model *model) {
@@ -1389,58 +1077,97 @@ SQL_API void sql_model_close(Model *model) {
         free_array(model->tensors);
         model->tensors = NULL;
     }
-    model->tensor_count = 0;
-    release_tokenizer(&model->tokenizer, model->config.vocab_size);
-    memset(&model->tokenizer, 0, sizeof(Tokenizer));
     free_array(model);
 }
 
-SQL_API int sql_model_generate(const Model *model, const char *question, int limit,
-                               SqlGeneration *out) {
-    sql_set_last_error(NULL);
-    if (out) {
-        memset(out, 0, sizeof(*out));
+static int32_t select_greedy_token(const float *logits, const uint8_t *allowed,
+                                   int vocab_size, int32_t eos_id) {
+    int32_t best = eos_id;
+    for (int32_t id = 0; id < vocab_size; ++id) {
+        if (allowed[id] && logits[id] > logits[best]) {
+            best = id;
+        }
     }
-    if (!model || !question || !out || limit < 0) {
+    return best;
+}
+
+SQL_API int sql_model_generate_ids(const Model *model, const int32_t *prompt_ids,
+                                   int32_t prompt_count, const uint8_t *allowed,
+                                   int32_t allowed_count, int32_t eos_id,
+                                   int32_t max_new_tokens, int32_t *generated,
+                                   int32_t generated_capacity, int32_t *generated_count,
+                                   int32_t *stop_reason, double *compute_ms) {
+    sql_set_last_error(NULL);
+    if (generated_count) {
+        *generated_count = 0;
+    }
+    if (compute_ms) {
+        *compute_ms = 0;
+    }
+    if (!model || !prompt_ids || !allowed || !generated_count || !stop_reason ||
+        !compute_ms) {
         sql_set_last_error("invalid generation arguments");
         return 0;
     }
+    const int vocab_size = model->config.vocab_size;
+    if (prompt_count <= 0 || prompt_count > model->config.context_length ||
+        max_new_tokens < 0 || allowed_count != vocab_size || eos_id < 0 ||
+        eos_id >= vocab_size) {
+        sql_set_last_error("invalid prompt length, limit, vocabulary mask or EOS");
+        return 0;
+    }
+    for (int i = 0; i < prompt_count; ++i) {
+        if (prompt_ids[i] < 0 || prompt_ids[i] >= vocab_size) {
+            sql_set_last_error("token ID outside vocabulary");
+            return 0;
+        }
+    }
+    int room = model->config.context_length - prompt_count;
+    int budget = max_new_tokens < room ? max_new_tokens : room;
+    if (generated_capacity < budget || (budget && !generated)) {
+        sql_set_last_error("missing or undersized generated ID buffer");
+        return 0;
+    }
+    int reason = max_new_tokens <= room ? SQL_STOP_MAX_NEW_TOKENS : SQL_STOP_CONTEXT;
+    if (!budget) {
+        *stop_reason = reason;
+        return 1;
+    }
+
     jmp_buf bailout;
     s_current_bailout = &bailout;
     if (setjmp(bailout)) {
         finish_call(0);
         return 0;
     }
-    int *ids = allocate_array(model->config.context_length, sizeof(*ids));
-    int prompt_count = prepare_prompt_tokens(model, question, ids);
-    int count = prompt_count;
-    const char *stop = generate_tokens(model, ids, &count, limit);
-    size_t size = 0;
-    for (int i = prompt_count; i < count; ++i) {
-        size_t len = model->tokenizer.token_byte_lengths[ids[i]];
-        if (len > MAX_ALLOCATION_BYTES - size) {
-            fail("generated output too large");
+    double start_ms = monotonic_milliseconds();
+    // The last emitted ID never needs a forward pass when either budget is spent.
+    KvCache cache = create_kv_cache(model, prompt_count + budget - 1);
+    float *logits = allocate_array(vocab_size, sizeof(*logits));
+    for (int i = 0; i < prompt_count; ++i) {
+        cached_forward_token(model, &cache, prompt_ids[i],
+                             i == prompt_count - 1 ? logits : NULL);
+    }
+    double elapsed_ms = monotonic_milliseconds() - start_ms;
+    int count = 0;
+    while (count < budget) {
+        int32_t next = select_greedy_token(logits, allowed, vocab_size, eos_id);
+        if (next == eos_id) {
+            reason = SQL_STOP_EOS;
+            break;
         }
-        size += len;
+        generated[count++] = next;
+        if (count < budget) {
+            start_ms = monotonic_milliseconds();
+            cached_forward_token(model, &cache, next, logits);
+            elapsed_ms += monotonic_milliseconds() - start_ms;
+        }
     }
-    unsigned char *data = allocate_array(size, 1);
-    size_t offset = 0;
-    for (int i = prompt_count; i < count; ++i) {
-        size_t len = model->tokenizer.token_byte_lengths[ids[i]];
-        memcpy(data + offset, model->tokenizer.token_bytes[ids[i]], len);
-        offset += len;
-    }
-    free_array(ids);
-    out->data = data;
-    out->length = size;
-    out->stop_reason = stop;
+    free_array(logits);
+    release_kv_cache(&cache);
     finish_call(1);
+    *generated_count = count;
+    *stop_reason = reason;
+    *compute_ms = elapsed_ms;
     return 1;
-}
-
-SQL_API void sql_generation_free(SqlGeneration *result) {
-    if (result) {
-        free_array(result->data);
-        memset(result, 0, sizeof(*result));
-    }
 }

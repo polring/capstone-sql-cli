@@ -16,6 +16,9 @@ public sealed partial class MainPage : Page
     public MainPage()
     {
         this.InitializeComponent();
+        PromptTextBox.TextChanged += (_, _) => ViewModel.InputText = PromptTextBox.Text;
+        PipelineRange.SetRange(ViewModel.SelectedRange);
+        PipelineRange.RangeChanged += ViewModel.SelectRange;
 
         ViewModel.PropertyChanged += (s, e) =>
         {
@@ -39,12 +42,19 @@ public sealed partial class MainPage : Page
                     PromptTextBox.Text = ViewModel.InputText;
                 }
             }
+            else if (e.PropertyName == nameof(ViewModel.SelectedRange))
+            {
+                PipelineRange.SetRange(ViewModel.SelectedRange);
+            }
         };
 
         HookSessionMessages();
     }
 
     private ConversationSession? _currentHookedSession;
+
+    private void SingleMode_Click(object sender, RoutedEventArgs e) => ViewModel.SetDualMode(false);
+    private void DualMode_Click(object sender, RoutedEventArgs e) => ViewModel.SetDualMode(true);
 
     private void HookSessionMessages()
     {
@@ -191,24 +201,8 @@ public sealed partial class MainPage : Page
 
     private void RunSqlButton_Click(object sender, RoutedEventArgs e)
     {
-        if (sender is FrameworkElement elem && elem.DataContext is ChatMessage message)
-        {
-            if (ViewModel.RunSqlCommand.CanExecute(message))
-            {
-                ViewModel.RunSqlCommand.Execute(message);
-            }
-        }
-    }
-
-    private void CopySqlButton_Click(object sender, RoutedEventArgs e)
-    {
-        if (sender is FrameworkElement elem && elem.DataContext is ChatMessage message)
-        {
-            if (ViewModel.CopySqlCommand.CanExecute(message.Sql))
-            {
-                ViewModel.CopySqlCommand.Execute(message.Sql);
-            }
-        }
+        if (sender is FrameworkElement { DataContext: ChatSqlCandidate candidate } && ViewModel.RunCandidateCommand.CanExecute(candidate))
+            ViewModel.RunCandidateCommand.Execute(candidate);
     }
 
     private void ToggleQueryResult_Click(object sender, RoutedEventArgs e)
