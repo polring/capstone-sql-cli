@@ -54,7 +54,7 @@ capstone-sql-cli/
 │   ├── v2/                       # GGUF 계약 검증용 소형 모델과 기준 출력
 │   └── dual/                     # 이중 모델 파이프라인의 입력·기대 결과 JSON
 ├── tests/SqlApp.Tests/           # 독립 실행형 .NET 회귀·통합 테스트 프로젝트
-├── .github/workflows/test.yml    # Linux·Windows 검증 작업
+├── .github/workflows/test.yml    # Linux에서 C 추론기 빌드·테스트·서식 검사
 └── CONTRACT.md                   # GGUF 형식과 C API 계약
 ```
 

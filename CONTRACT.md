@@ -147,6 +147,6 @@ cmake -E chdir build ctest -C Release --output-on-failure
 dotnet run --project tests/SqlApp.Tests -c Release
 ```
 
-CTest는 네 세트의 마지막 위치 logits를 fixture와 대조하고, 각 위치에서 전체 구간 계산과 KV 캐시 계산을 비교한다. 잘못된 입력에 대한 C API 오류 처리도 검사한다. logits의 절대·상대 허용 오차는 각각 `2e-5`다. C# 테스트는 토큰 ID, 생성 바이트와 종료 사유의 정확한 일치, 대소문자 보존 및 네이티브 계산 시간을 검사한다. CI는 Linux와 Windows에서 CTest를, Windows에서 C# 테스트를 실행한다. [네이티브 테스트 등록](native/CMakeLists.txt) · [CI 설정](.github/workflows/test.yml)
+CTest는 네 세트의 마지막 위치 logits를 fixture와 대조하고, 각 위치에서 전체 구간 계산과 KV 캐시 계산을 비교한다. 잘못된 입력에 대한 C API 오류 처리도 검사한다. logits의 절대·상대 허용 오차는 각각 `2e-5`다. 로컬에서 실행하는 C# 테스트는 토큰 ID, 생성 바이트와 종료 사유의 정확한 일치, 대소문자 보존 및 네이티브 계산 시간을 검사한다. CI는 Linux에서 C 추론기를 빌드하고 CTest와 clang-format 검사를 실행한다. [네이티브 테스트 등록](native/CMakeLists.txt) · [CI 설정](.github/workflows/test.yml)
 
 이중 모델 연동에는 `fixtures/dual/`의 원문·태그·SQL 예시를 사용한다. 테스트가 지정한 문자열을 생성하는 합성 GGUF 두 개를 만들어 실제 C 엔진을 호출하고, `home kitchen`의 두 매핑에서 뒷모델 호출 한 번으로 최종 SQL 두 개가 복원되는지 검사한다. 이 테스트의 검증 범위는 모델 단계 연결과 C# 복원 동작이다. [이중 모델 예시](fixtures/dual/category.json) · [네이티브 연동 테스트](tests/SqlApp.Tests/NativePipelineSmoke.cs)
