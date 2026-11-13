@@ -20,6 +20,36 @@ internal static class GgufContract
         Tokenizer + "seed_base", Tokenizer + "merge_base"
     ];
 
+    // Inspect only GGUF metadata when two filenames do not identify their roles.
+    internal static ModelRole? TryReadModelRole(string path)
+    {
+        try
+        {
+            using var reader = new BinaryReader(File.OpenRead(path), Encoding.UTF8);
+            int count = ReadHeader(reader);
+            ModelRole? role = null;
+            for (int i = 0; i < count; i++)
+            {
+                string key = ReadString(reader);
+                uint type = reader.ReadUInt32();
+                if (key is Tokenizer + "output_ids" or Tokenizer + "sql_ids")
+                {
+                    if (role.HasValue || ReadIdArray(reader, type).Length == 0) return null;
+                    role = key == Tokenizer + "output_ids" ? ModelRole.Front : ModelRole.Back;
+                }
+                else
+                {
+                    SkipField(reader, type);
+                }
+            }
+            return role;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException)
+        {
+            return null;
+        }
+    }
+
     internal static BpeCodec ReadTokenizer(string path, ModelRole role)
     {
         using var reader = new BinaryReader(File.OpenRead(path), Encoding.UTF8);
@@ -27,6 +57,8 @@ internal static class GgufContract
         var seen = new HashSet<string>(StringComparer.Ordinal);
         var integers = new Dictionary<string, int>(StringComparer.Ordinal);
         string[] seeds = [];
+        string[]? frontNames = null;
+        int[]? frontOutputIds = null;
         BpeMerge[] merges = [];
         int[]? sqlIds = null;
         for (int i = 0; i < count; i++)
@@ -41,13 +73,16 @@ internal static class GgufContract
                         throw new InvalidDataException("지원하지 않는 GGUF 아키텍처입니다.");
                     break;
                 case Tokenizer + "seeds":
-                    int seedCount = ReadArrayCount(reader, type, 8, MaxVocab);
-                    seeds = new string[seedCount];
-                    for (int j = 0; j < seeds.Length; j++) seeds[j] = ReadString(reader);
+                    seeds = ReadStringArray(reader, type);
+                    break;
+                case Tokenizer + "names" when role == ModelRole.Front:
+                    frontNames = ReadStringArray(reader, type);
+                    break;
+                case Tokenizer + "output_ids" when role == ModelRole.Front:
+                    frontOutputIds = ReadIdArray(reader, type);
                     break;
                 case Tokenizer + "sql_ids":
-                    sqlIds = new int[ReadArrayCount(reader, type, 4, MaxVocab)];
-                    for (int j = 0; j < sqlIds.Length; j++) sqlIds[j] = ReadInteger(reader);
+                    sqlIds = ReadIdArray(reader, type);
                     break;
                 case Tokenizer + "merges":
                     int entries = ReadArrayCount(reader, type, 4, MaxVocab * 3);
@@ -83,7 +118,9 @@ internal static class GgufContract
         return role switch
         {
             ModelRole.Single => new SingleModelTokenizer(vocabulary),
-            ModelRole.Front => new FrontModelTokenizer(vocabulary),
+            ModelRole.Front => new FrontModelTokenizer(vocabulary,
+                frontNames ?? throw new InvalidDataException("앞모델 GGUF에 tokenizer.names가 없습니다."),
+                frontOutputIds ?? throw new InvalidDataException("앞모델 GGUF에 tokenizer.output_ids가 없습니다.")),
             ModelRole.Back => new BackModelTokenizer(vocabulary),
             _ => throw new ArgumentOutOfRangeException(nameof(role))
         };
@@ -106,6 +143,20 @@ internal static class GgufContract
         ulong count = reader.ReadUInt64();
         if (count > (ulong)maximum) throw new InvalidDataException("GGUF 토크나이저 배열이 너무 큽니다.");
         return (int)count;
+    }
+
+    private static string[] ReadStringArray(BinaryReader reader, uint type)
+    {
+        var values = new string[ReadArrayCount(reader, type, 8, MaxVocab)];
+        for (int i = 0; i < values.Length; i++) values[i] = ReadString(reader);
+        return values;
+    }
+
+    private static int[] ReadIdArray(BinaryReader reader, uint type)
+    {
+        var ids = new int[ReadArrayCount(reader, type, 4, MaxVocab)];
+        for (int i = 0; i < ids.Length; i++) ids[i] = ReadInteger(reader);
+        return ids;
     }
 
     private static int ReadInteger(BinaryReader reader)

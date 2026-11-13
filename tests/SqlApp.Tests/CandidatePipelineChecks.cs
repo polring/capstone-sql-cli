@@ -21,6 +21,7 @@ internal static class CandidatePipelineChecks
     internal static async Task RunAsync(string directory, string db, IReadOnlyList<TableSchemaInfo> schema)
     {
         var session = new ConversationSession();
+        await VerifyStageDetailsExampleAsync(session, directory, db);
         const string valueTag = "[items.category, string, #1]";
         const string category = "[TABLE1.COL2, string, #1]";
         List<MappingRecord> Map(string source, string tags) =>
@@ -49,6 +50,12 @@ internal static class CandidatePipelineChecks
             var (first, second) = bindings[candidate.MappingIndices.Single()];
             return candidate.Sql == $"SELECT item_name FROM items WHERE category IN ('{first}', '{second}')";
         }), "Each SQL uses both values from the same mapping");
+        string details = session.Messages.Last().StageDetails;
+        Require(details.Contains("names = {items.item_name, string}") &&
+            bindings.All(binding => details.Contains($"{binding.Item1} = {valueTag}") &&
+                details.Contains($"{binding.Item2} = [items.category, string, #2]")) &&
+            pairs.FinalSqlCandidates.All(candidate => details.Contains($"후보 {candidate.MappingIndices.Single() + 1}\n{candidate.Sql}")),
+            "Show the source alias, both complete value assignments, and each restored SQL in the stage details");
         string mappings = pairs.SerializeMappings();
         using var exported = JsonDocument.Parse(mappings);
         VerifyEnvelope(exported.RootElement, session.Id, session.Messages.Last().Id);
@@ -96,6 +103,48 @@ internal static class CandidatePipelineChecks
         var withCase = Map("show x a x A x", $"show <items> {valueTag} <items>")
             .Select(mapping => mapping.Values.Single().Value).ToHashSet(StringComparer.Ordinal);
         Require(withCase.Contains("a") && withCase.Contains("A"), "Preserve case when comparing condition values");
+    }
+
+    private static async Task VerifyStageDetailsExampleAsync(ConversationSession session, string directory, string db)
+    {
+        const string original = "How many customers are there?";
+        const string tagged = "How many <customers> are there?";
+        const string taggedSql = "SELECT {COUNT(*)} FROM <TABLE1>";
+        await session.RunInSessionAsync(new(PipelineStage.Front, PipelineStage.Postprocessor), original, "",
+            directory, db, [new TableSchemaInfo { TableName = "customers" }],
+            (stage, _) => Task.FromResult(stage == PipelineStage.Front
+                ? new InferenceResult(tagged, "eos", 124.644)
+                : new InferenceResult(taggedSql, "eos", 34.177)));
+        const string expected = """
+            [앞모델 · eos · 추론 124.644 ms]
+            입력
+            How many customers are there?
+            출력
+            How many <customers> are there?
+
+            [매퍼 · 완료]
+            입력
+            How many customers are there?
+            How many <customers> are there?
+            매핑
+            customers = <customers>
+            출력
+            How many <TABLE1> are there?
+
+            [뒷모델 · eos · 추론 34.177 ms]
+            입력
+            How many <TABLE1> are there?
+            출력
+            SELECT {COUNT(*)} FROM <TABLE1>
+
+            [후처리기 · 완료]
+            입력
+            SELECT {COUNT(*)} FROM <TABLE1>
+            출력
+            SELECT COUNT(*) FROM customers
+            """;
+        Require(session.Messages.Last().StageDetails.ReplaceLineEndings("\n") == expected.ReplaceLineEndings("\n"),
+            "The four-stage details match the requested customers example line for line");
     }
 
     private static void VerifyEnvelope(JsonElement envelope, string conversationId, Guid messageId)

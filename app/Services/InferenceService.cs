@@ -7,7 +7,11 @@ namespace SqlApp.Services;
 public sealed class InferenceService : IDisposable
 {
     private readonly object _lock = new();
-    private sealed record LoadedModel(string Path, DateTime Modified, long Length, BpeCodec Tokenizer, SqlModel Handle);
+    private sealed record LoadedModel(string Path, DateTime Modified, long Length, BpeCodec Tokenizer, SqlModel Handle)
+    {
+        public bool Matches(FileInfo file) =>
+            Path == file.FullName && Modified == file.LastWriteTimeUtc && Length == file.Length;
+    }
     private readonly Dictionary<ModelRole, LoadedModel> _models = new();
     private bool _disposed;
 
@@ -28,6 +32,11 @@ public sealed class InferenceService : IDisposable
         if (!File.Exists(modelPath)) return $"{name} GGUF 파일이 필요합니다.";
         try
         {
+            var file = new FileInfo(modelPath);
+            lock (_lock)
+            {
+                if (_models.TryGetValue(role, out var loaded) && loaded.Matches(file)) return null;
+            }
             GgufContract.ReadTokenizer(modelPath, role);
             return null;
         }
@@ -54,8 +63,7 @@ public sealed class InferenceService : IDisposable
                     throw new InvalidOperationException("GGUF 모델을 선택하세요.");
                 var file = new FileInfo(path);
                 if (!file.Exists) throw new FileNotFoundException("GGUF 모델을 찾을 수 없습니다.", path);
-                if (!_models.TryGetValue(role, out var current) || current.Path != file.FullName
-                    || current.Modified != file.LastWriteTimeUtc || current.Length != file.Length)
+                if (!_models.TryGetValue(role, out var current) || !current.Matches(file))
                 {
                     var tokenizer = GgufContract.ReadTokenizer(file.FullName, role);
                     var next = new LoadedModel(file.FullName, file.LastWriteTimeUtc, file.Length,

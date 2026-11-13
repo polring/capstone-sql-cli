@@ -19,10 +19,10 @@ internal abstract class BpeCodec
     internal int EosId => Vocabulary.EosId;
     internal byte[] DecodableMask { get; }
 
-    protected BpeCodec(BpeVocabulary vocabulary)
+    protected BpeCodec(BpeVocabulary vocabulary, int[]? outputIds = null, int minimumSeedLength = 2)
     {
         Vocabulary = vocabulary;
-        var (vocabSize, context, padId, bosId, eosId, sepId, seedBase, mergeBase, seeds, merges, sqlIds) = vocabulary;
+        var (vocabSize, context, padId, bosId, eosId, sepId, seedBase, mergeBase, seeds, merges, _) = vocabulary;
         if (vocabSize is < 256 or > GgufContract.MaxVocab || context is < 1 or > 4096 ||
             seedBase < 256 || mergeBase < seedBase || mergeBase > vocabSize ||
             seeds.Length > mergeBase - seedBase || merges.Length > vocabSize - mergeBase)
@@ -39,7 +39,7 @@ internal abstract class BpeCodec
         for (int i = 0; i < seeds.Length; i++)
         {
             string seed = seeds[i];
-            if (seed.Length < 2 || char.IsWhiteSpace(seed[0]) || char.IsWhiteSpace(seed[^1]) ||
+            if (seed.Length < minimumSeedLength || char.IsWhiteSpace(seed[0]) || char.IsWhiteSpace(seed[^1]) ||
                 seed.Any(c => c is '\0' or > '\x7f') || !seedIds.TryAdd(seed, seedBase + i))
                 throw new InvalidDataException("GGUF seed 토큰이 올바르지 않습니다.");
             _byteLengths[seedBase + i] = seed.Length;
@@ -59,13 +59,13 @@ internal abstract class BpeCodec
             _byteLengths[result] = length;
         }
 
-        if (sqlIds == null)
+        if (outputIds == null)
             DecodableMask = Array.ConvertAll(_byteLengths, length => length > 0 ? (byte)1 : (byte)0);
         else
         {
-            // The native generator considers EOS separately from the decoded SQL tokens.
+            // The model's validated list starts with EOS, which the native generator handles separately.
             DecodableMask = new byte[vocabSize];
-            foreach (int id in sqlIds.AsSpan(1)) DecodableMask[id] = 1;
+            foreach (int id in outputIds.AsSpan(1)) DecodableMask[id] = 1;
         }
     }
 
@@ -74,19 +74,19 @@ internal abstract class BpeCodec
 
     internal int[] Encode(string text)
     {
-        ValidateAscii(text);
+        ValidateInput(text);
         return EncodePieces(text, Context).ToArray();
     }
 
     internal int[] EncodePrompt(string question)
     {
-        ValidateAscii(question);
+        ValidateInput(question);
         if (Context < 2) throw ContextExceeded();
         var content = EncodePieces(question, Context - 2);
         return [Vocabulary.BosId, .. content, Vocabulary.SepId];
     }
 
-    private void ValidateAscii(string text)
+    protected virtual void ValidateInput(string text)
     {
         ArgumentNullException.ThrowIfNull(text);
         foreach (char c in text)

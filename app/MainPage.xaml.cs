@@ -56,6 +56,14 @@ public sealed partial class MainPage : Page
     private void SingleMode_Click(object sender, RoutedEventArgs e) => ViewModel.SetDualMode(false);
     private void DualMode_Click(object sender, RoutedEventArgs e) => ViewModel.SetDualMode(true);
 
+    private void PromptSuggestion_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button { DataContext: string suggestion }) return;
+        ViewModel.UsePromptSuggestionCommand.Execute(suggestion);
+        PromptTextBox.Focus(FocusState.Programmatic);
+        PromptTextBox.Select(PromptTextBox.Text.Length, 0);
+    }
+
     private void HookSessionMessages()
     {
         if (_currentHookedSession != null)
@@ -150,10 +158,10 @@ public sealed partial class MainPage : Page
         {
             if (string.IsNullOrWhiteSpace(tb.Text) || !int.TryParse(tb.Text.Trim(), out int val) || val <= 0)
             {
-                tb.Text = "64";
+                tb.Text = ConversationSession.DefaultMaxTokens.ToString();
                 if (ViewModel.SelectedSession != null)
                 {
-                    ViewModel.SelectedSession.MaxTokens = 64;
+                    ViewModel.SelectedSession.MaxTokens = ConversationSession.DefaultMaxTokens;
                 }
             }
         }

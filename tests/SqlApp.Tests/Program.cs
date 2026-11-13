@@ -1,13 +1,89 @@
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using Microsoft.Data.Sqlite;
+using SqlApp.Interop.SqlEngine;
 using SqlApp.Models;
 using SqlApp.Services;
 using SqlApp.Services.Pipeline;
+using SqlApp.ViewModels;
 
 static void Require(bool ok, string message)
 {
     if (!ok) throw new InvalidOperationException(message);
+}
+
+static async Task VerifyAutomaticBundlesAsync(string tempRoot, string frontModel)
+{
+    string assetsRoot = Path.Combine(tempRoot, "assets");
+    string Folder(string name, params string[] files)
+    {
+        string folder = Directory.CreateDirectory(Path.Combine(assetsRoot, name)).FullName;
+        foreach (string file in files) File.WriteAllBytes(Path.Combine(folder, file), []);
+        return folder;
+    }
+
+    Folder("stage900", "shop.db", "model.gguf");
+    string single = Folder("z-single", "Catalog.DB", "front.GGUF", "Catalog.DB-wal");
+    Folder("stage800", "shop.db", "back.gguf", "front.gguf");
+    Folder("generic-pair", "schema.db", "a.gguf", "b.gguf");
+    string dual = Folder("z-dual", "other.Db", "first.GgUf", "second.gguf");
+    File.Copy(frontModel, Path.Combine(dual, "second.gguf"), overwrite: true);
+    Folder("no-db", "front.gguf", "back.gguf");
+    Folder("no-model", "shop.db");
+    Folder("extra-db", "shop.db", "other.db", "model.gguf");
+    Folder("extra-model", "shop.db", "front.gguf", "back.gguf", "third.gguf");
+
+    var bundles = AssetDiscoveryService.DiscoverBundles(assetsRoot);
+    Require(bundles.Count == 5 && bundles.Count(b => b.IsDual) == 3,
+        "Auto-discovery requires exactly one DB and one or two GGUF files");
+    var one = bundles.Single(b => b.DirectoryPath == single);
+    Require(!one.IsDual && one.ModelPath == Path.Combine(single, "front.GGUF") &&
+        one.DbPath == Path.Combine(single, "Catalog.DB"), "A lone model is single regardless of its name");
+    var two = bundles.Single(b => b.DirectoryPath == dual);
+    Require(two.IsDual && two.DbPath == Path.Combine(dual, "other.Db") &&
+        two.FrontModelPath == Path.Combine(dual, "second.gguf") && two.BackModelPath == Path.Combine(dual, "first.GgUf"),
+        "A front GGUF with a custom name keeps its role even when it sorts last");
+    var named = bundles.Single(b => b.Name == "stage800");
+    Require(Path.GetFileName(named.FrontModelPath) == "front.gguf" && Path.GetFileName(named.BackModelPath) == "back.gguf",
+        "Explicit front and back filenames preserve their roles");
+    var generic = bundles.Single(b => b.Name == "generic-pair");
+    Require(new HashSet<string> { Path.GetFileName(generic.FrontModelPath), Path.GetFileName(generic.BackModelPath) }
+        .SetEquals(["a.gguf", "b.gguf"]), "Two generic names still qualify and use both model files");
+    var ascending = bundles.OrderBy(b => b.Name, StringComparer.Ordinal);
+    Require(AssetDiscoveryService.GetDefaultBundle(ascending, false) == one &&
+        AssetDiscoveryService.GetDefaultBundle(ascending, true) == two, "Folder name takes precedence over stage numbers");
+
+    using var inference = new InferenceService();
+    var history = new SessionStorageService(Path.Combine(tempRoot, "auto-history"));
+    var vm = new MainViewModel(ascending.ToList(), history, inference);
+    await vm.Initialization;
+    Require(vm.CurrentSessionBundle == one, "A new chat selects the alphabetically last single bundle");
+    vm.SetDualMode(true);
+    Require(vm.CurrentSessionBundle == two, "Switching to dual mode selects the alphabetically last dual bundle");
+    vm.SelectBundle(named);
+    await history.SaveSessionsAsync(vm.Sessions);
+    Require((await history.LoadSessionsAsync(bundles)).Single().Bundle == named,
+        "Reopening a chat restores its chosen folder even when another is the default");
+}
+
+static void VerifyFrontTokenizer(string model)
+{
+    // Reference IDs from mapper feat/#4-natural-questions (dc640bf), using this bundled model.
+    var tokenizer = GgufContract.ReadTokenizer(model, ModelRole.Front);
+    Require(tokenizer.EncodePrompt("date #1").AsSpan().SequenceEqual([257, 398, 32, 35, 49, 259]),
+        "Front questions apply word BPE to date and preserve #1 as two bytes");
+    Require(tokenizer.Encode("café\0😀").AsSpan().SequenceEqual([99, 486, 195, 169, 0, 240, 159, 152, 128]),
+        "Front questions preserve UTF-8 bytes and NUL");
+    Require(tokenizer.Encode("<customers>").AsSpan().SequenceEqual([60, 489, 62]) &&
+        tokenizer.Decode([60, 267, 62]).AsSpan().SequenceEqual("<customers>"u8),
+        "Schema names use word BPE in questions and dedicated IDs inside output tags");
+
+    const string outputChars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789.,?'-<>{}[]*";
+    var expected = outputChars.Select(c => (int)c).ToHashSet();
+    expected.UnionWith(Enumerable.Range(260, 623)); // Model's 7 fixed atoms, 16 names and 600 merges
+    Require(tokenizer.EosId == 258 && Enumerable.Range(0, tokenizer.VocabSize)
+        .All(id => (tokenizer.DecodableMask[id] != 0) == expected.Contains(id)),
+        "Every front output ID matches mapper; native generation handles EOS separately");
 }
 
 var root = new DirectoryInfo(AppContext.BaseDirectory);
@@ -16,6 +92,8 @@ while (!File.Exists(Path.Combine(root.FullName, "SqlApp.sln")))
 var temp = Directory.CreateDirectory(Path.Combine(root.FullName, "build", "tests", Guid.NewGuid().ToString("N")));
 try
 {
+    string frontModel = Path.Combine(root.FullName, "assets", "dual-model-test", "front.gguf");
+    await VerifyAutomaticBundlesAsync(temp.FullName, frontModel);
     string single = Directory.CreateDirectory(Path.Combine(temp.FullName, "single")).FullName;
     string dual = Directory.CreateDirectory(Path.Combine(temp.FullName, "dual")).FullName;
     string db = Path.Combine(dual, "shop.db");
@@ -39,7 +117,8 @@ try
     var bundle = AssetDiscoveryService.AddFolder(assets, dual)!;
     Require(bundle.IsDual && bundle.FrontModelPath == "" && bundle.BackModelPath == back, "Back role discovery");
     string front = Path.Combine(dual, "front.gguf");
-    File.Copy(singleModel, front);
+    File.Copy(frontModel, front);
+    VerifyFrontTokenizer(front);
     bundle = AssetDiscoveryService.AddFolder(assets, dual)!;
     Require(bundle.FrontModelPath == front && assets.Count == 2, "Refresh a dual bundle");
 
@@ -74,9 +153,10 @@ try
         name == "sql_engine" ? NativeLibrary.Load(nativePath) : IntPtr.Zero);
     await SqlQueryChecks.VerifyChatAsync(temp.FullName, db);
     await ViewModelChecks.RunAsync(temp.FullName, assets);
+    await JsonBatchChecks.RunAsync(temp.FullName, assets);
     using var inference = new InferenceService();
     Require(inference.GetStageUnavailableReason(PipelineStage.Front, "") != null, "Missing model availability");
-    Console.WriteLine("Verified asset discovery, session migration, stage selection, candidate mapping, SQL validation and execution.");
+    Console.WriteLine("Verified asset discovery, session migration, stage selection, candidate mapping, SQL validation and execution, and JSON batch inference and evaluation.");
 }
 finally
 {

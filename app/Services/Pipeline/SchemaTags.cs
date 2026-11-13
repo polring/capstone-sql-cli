@@ -7,6 +7,7 @@ internal static class SchemaTags
 {
     internal const string Name = @"[A-Za-z_][A-Za-z_0-9]*";
     internal const string Type = "(?:string|numeric|date)";
+    internal const string NumericSqlType = "INT|REAL|FLOA|DOUB|NUMERIC|DECIMAL";
     internal const string Field = Name + @"\." + Name + @",\s*" + Type;
     internal const string Value = @"\[(?:" + Name + @"\." + Name + @"|AGG_VALUE),\s*" + Type + @",\s*#[1-3]\]";
     internal const string Mark = @"(?:<" + Name + @">|<" + Field + @">|\{" + Field + @"\}|\{\*\}|" + Value + ")";
@@ -35,7 +36,7 @@ internal static class SchemaTags
                 string declared = descriptor[(separator + 2)..].TrimEnd(')');
                 string pattern = type switch
                 {
-                    "numeric" => "INT|REAL|FLOA|DOUB|NUMERIC|DECIMAL",
+                    "numeric" => NumericSqlType,
                     "string" => "CHAR|TEXT|CLOB",
                     _ => "DATE|CHAR|TEXT|CLOB"
                 };

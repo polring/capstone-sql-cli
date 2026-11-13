@@ -2,7 +2,7 @@ using System.Text.RegularExpressions;
 
 namespace SqlApp.Interop.SqlEngine;
 
-internal sealed class BackModelTokenizer(BpeVocabulary vocabulary) : BpeCodec(vocabulary)
+internal sealed class BackModelTokenizer(BpeVocabulary vocabulary) : BpeCodec(vocabulary, vocabulary.SqlIds)
 {
     private const string TaggedField = @"TABLE1\.COL[1-6], (?:string|numeric|date)";
     private static readonly Regex TaggedQuestionPieces = new(
