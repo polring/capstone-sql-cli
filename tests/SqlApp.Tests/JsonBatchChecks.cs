@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Text.Json.Nodes;
 using SqlApp.Models;
 using SqlApp.Services;
@@ -12,7 +13,7 @@ internal static class JsonBatchChecks
         var single = assets.Single(b => !b.IsDual);
         var dual = assets.Single(b => b.IsDual);
         using var inference = new InferenceService();
-        var calls = new List<string>();
+        var calls = new ConcurrentBag<string>();
         const int tokens = 39;
         const string question = "count items.";
         const string tagged = "count <items>.";
@@ -55,8 +56,8 @@ internal static class JsonBatchChecks
         string resultPath = Path.Combine(directory, "questions.v2_eval.json");
         var evaluated = JsonNode.Parse(await File.ReadAllTextAsync(resultPath))!.AsArray();
         var originals = JsonNode.Parse(source)!.AsArray();
-        Require(await File.ReadAllTextAsync(path) == source && calls.SequenceEqual(["match", "case", "space"]),
-            "The source stays intact and every row runs in order");
+        Require(await File.ReadAllTextAsync(path) == source && calls.Order().SequenceEqual(["case", "match", "space"]),
+            "The source stays intact and every row runs once");
         Require(evaluated.Count == originals.Count, "Evaluation retains all records");
         for (int i = 0; i < evaluated.Count; i++)
         {
@@ -119,70 +120,80 @@ internal static class JsonBatchChecks
 
     private static async Task VerifyBatchStopAsync(string directory, List<AssetBundle> assets, bool dual)
     {
-        const string question = "count items.";
-        const string tagged = "count <items>.";
-        const string taggedSql = "SELECT {COUNT(*)} FROM <TABLE1>";
-        const string sql = "SELECT COUNT(*) FROM items";
         string name = dual ? "stop-dual" : "stop-single";
         var history = new SessionStorageService(Path.Combine(directory, name));
         using var inference = new InferenceService();
-        var inFlight = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var finishQuestion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        int calls = 0;
-        async Task<InferenceResult> Predict(string response)
+        var firstStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var thirdStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var finish = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var calls = new int[4];
+        static string Sql(int n) => $"SELECT COUNT(*) FROM items LIMIT {n}";
+        async Task<InferenceResult> Predict(string input)
         {
-            if (++calls == 2)
+            int n = input[0] - '0';
+            Interlocked.Increment(ref calls[n - 1]);
+            if (n == 1 || n == 3)
             {
-                inFlight.SetResult();
-                await finishQuestion.Task;
+                (n == 1 ? firstStarted : thirdStarted).TrySetResult();
+                await finish.Task;
             }
-            return new InferenceResult(response, "eos", 1);
+            return new InferenceResult(dual ? input.Replace("items", "<items>") : Sql(n), "eos", 1);
         }
         var vm = new MainViewModel(assets.ToList(), history, inference,
-            (stage, _, _, _) => stage == PipelineStage.Front
-                ? Predict(tagged) : Task.FromResult(new InferenceResult(taggedSql, "eos", 1)),
-            (_, _, _) => Predict(sql));
+            (stage, _, input, _) => stage == PipelineStage.Front ? Predict(input) :
+                Task.FromResult(new InferenceResult($"SELECT {{COUNT(*)}} FROM <TABLE1> LIMIT {input[0]}", "eos", 1)),
+            (_, input, _) => Predict(input), batchWorkerCount: 2);
         await vm.Initialization;
         vm.SetDualMode(dual);
         vm.SelectBundle(assets.Single(b => b.IsDual == dual));
         var session = vm.SelectedSession!;
         var rows = new JsonArray();
-        for (int i = 0; i < 3; i++)
+        for (int n = 1; n <= calls.Length; n++)
         {
-            var row = new JsonObject { ["id"] = i, ["input"] = question };
-            if (dual) row["output"] = sql;
+            var row = new JsonObject { ["id"] = n, ["input"] = $"{n} count items." };
+            if (dual) row["output"] = n == 2 ? "SELECT 2" : Sql(n);
             rows.Add(row);
         }
         string path = Path.Combine(directory, name + ".json");
         string outputPath = Path.Combine(directory, name + (dual ? "_eval.json" : "_infer.json"));
         string original = rows.ToJsonString();
         await File.WriteAllTextAsync(path, original);
+        const string oldResult = "[]";
+        await File.WriteAllTextAsync(outputPath, oldResult);
         var running = vm.ImportJsonFileAsync(path);
-        await inFlight.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        // With two workers, question 2 must finish before 3 can start while 1 is held.
+        await Task.WhenAll(firstStarted.Task, thirdStarted.Task).WaitAsync(TimeSpan.FromSeconds(10));
         Require(vm.IsJsonBatchRunning && vm.IsGenerating && !vm.CanStartInference && vm.CancelJsonBatchCommand.CanExecute(null),
             "An active batch offers Stop while a row is generating");
         vm.CancelJsonBatchCommand.Execute(null);
         vm.CancelJsonBatch();
         Require(vm.IsStoppingJsonBatch && vm.IsGenerating && !vm.CancelJsonBatchCommand.CanExecute(null) &&
-            vm.StatusMessage == "현재 질문을 마친 뒤 중단합니다." && !running.IsCompleted,
-            "Stop acknowledges the request while the in-flight question continues");
-        finishQuestion.SetResult();
+            vm.StatusMessage == "진행 중인 질문을 모두 마친 뒤 중단합니다." && !running.IsCompleted &&
+            await File.ReadAllTextAsync(outputPath) == oldResult,
+            "Stop waits for both active questions and keeps the old result intact until saving");
+        finish.SetResult();
         await running.WaitAsync(TimeSpan.FromSeconds(10));
         var summary = session.Messages.Single(m => m.IsAssistant);
         var partial = JsonNode.Parse(await File.ReadAllTextAsync(outputPath))!.AsArray();
-        Require(calls == 2 && partial.Count == 2 && await File.ReadAllTextAsync(path) == original,
-            "Stop preserves the second question and never starts the third");
-        for (int i = 0; i < partial.Count; i++)
-            Require(partial[i]!["id"]!.GetValue<int>() == i && partial[i]!["output"]!.GetValue<string>() == sql &&
-                (!dual || partial[i]!["matched"]!.GetValue<bool>()), "Every saved question ran to completion");
+        Require(calls.SequenceEqual([1, 1, 1, 0]) && partial.Count == 3 && await File.ReadAllTextAsync(path) == original,
+            "Stop finishes all admitted questions and never starts the fourth");
+        for (int n = 1; n <= partial.Count; n++)
+        {
+            var saved = partial[n - 1]!;
+            Require(saved["id"]!.GetValue<int>() == n &&
+                saved["output"]!.GetValue<string>() == (dual && n == 2 ? "SELECT 2" : Sql(n)) &&
+                (!dual || saved["matched"]!.GetValue<bool>() == (n != 2)),
+                "Out-of-order completions save predictions and scores at the original input positions");
+        }
         Require(!vm.IsJsonBatchRunning && vm.CanStartInference && !vm.CancelJsonBatchCommand.CanExecute(null) &&
-            !summary.HasError && summary.Text.Contains("3개 중 2개 처리 후 중단") && summary.Text.Contains(outputPath) &&
-            summary.Text.Contains(dual ? "2개가 일치" : "2개의 output") && !summary.Text.Contains("추론 실패"),
-            "The summary includes the in-flight question and the UI returns to the send state");
+            !summary.HasError && summary.Text.Contains("4개 중 3개 처리 후 중단") && summary.Text.Contains(outputPath) &&
+            summary.Text.Contains(dual ? "2개가 일치" : "3개의 output") && !summary.Text.Contains("추론 실패"),
+            "The summary counts every finished question and the UI returns to the send state");
         await vm.ImportJsonFileAsync(path);
-        Require(calls == 5 && !session.Messages.Last().Text.Contains("중단") &&
-            JsonNode.Parse(await File.ReadAllTextAsync(outputPath))!.AsArray().Count == 3,
-            "Starting a new batch after stopping gets a fresh token");
+        var restarted = JsonNode.Parse(await File.ReadAllTextAsync(outputPath))!.AsArray();
+        Require(calls.SequenceEqual([2, 2, 2, 1]) && !session.Messages.Last().Text.Contains("중단") &&
+            restarted.Select(row => row!["id"]!.GetValue<int>()).SequenceEqual([1, 2, 3, 4]),
+            "A new batch after stopping runs and saves every question in input order");
     }
 
     private static async Task VerifyCandidatesAndInvalidInputAsync(string directory)

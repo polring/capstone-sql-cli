@@ -71,6 +71,79 @@ internal static class JsonBatchCancellationChecks
             JsonNode.DeepEquals(JsonNode.Parse("""[{"input":"fails","output":null}]"""),
                 JsonNode.Parse(await File.ReadAllTextAsync(failed.Path))),
             "A failed current question still receives its normal failure record before the batch stops");
+        await VerifyParallelResultsAsync(directory);
+        await VerifyWorkerFailureAsync(directory);
+    }
+
+    private static async Task VerifyParallelResultsAsync(string directory)
+    {
+        string path = Path.Combine(directory, "parallel-candidates.json");
+        await File.WriteAllTextAsync(path, """[{"input":"slow"},{"input":"fails"},{"input":"fast"}]""");
+        var releaseSlow = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var progress = new List<int>();
+        async Task<IReadOnlyList<string>> InferAsync(string input)
+        {
+            if (input == "slow")
+            {
+                await releaseSlow.Task;
+                return ["SQL A", "SQL B", "SQL A"];
+            }
+            if (input == "fails") throw new FormatException("Unsupported input");
+            return ["SQL C"];
+        }
+        var batch = JsonBatchService.ProcessAsync(path, [InferAsync, InferAsync], CancellationToken.None,
+            (done, total) =>
+            {
+                Require(total == 3, "Every progress update uses the full dataset size");
+                progress.Add(done);
+                if (done == 2) releaseSlow.SetResult();
+            });
+        var result = await batch.WaitAsync(TimeSpan.FromSeconds(10));
+        var expected = JsonNode.Parse("""
+            [{"input":"slow","output":["SQL A","SQL B"]},{"input":"fails","output":null},{"input":"fast","output":"SQL C"}]
+            """);
+        Require(result is { IsCancelled: false, Total: 3, Processed: 3, Succeeded: 2 } &&
+            progress.SequenceEqual([0, 1, 2, 3]) &&
+            JsonNode.DeepEquals(expected, JsonNode.Parse(await File.ReadAllTextAsync(result.Path))),
+            "Parallel failures and multi-candidate outputs retain their original rows and report completion once per row");
+    }
+
+    private static async Task VerifyWorkerFailureAsync(string directory)
+    {
+        string path = Path.Combine(directory, "worker-fault.json");
+        string output = Path.Combine(directory, "worker-fault_infer.json");
+        const string previous = """[{"saved":"previous"}]""";
+        await File.WriteAllTextAsync(path, """[{"input":"active"},{"input":"fault"}]""");
+        await File.WriteAllTextAsync(output, previous);
+        var faulted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var fault = new IOException("Model could not be read");
+        int finished = 0;
+        async Task<IReadOnlyList<string>> InferAsync(string input)
+        {
+            if (input == "fault")
+            {
+                faulted.SetResult();
+                throw fault;
+            }
+            await release.Task;
+            Interlocked.Increment(ref finished);
+            return ["ok"];
+        }
+        var batch = JsonBatchService.ProcessAsync(path, [InferAsync, InferAsync], CancellationToken.None);
+        await faulted.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        Require(!batch.IsCompleted, "A fatal error waits for active calls before releasing their engines");
+        release.SetResult();
+        try
+        {
+            await batch.WaitAsync(TimeSpan.FromSeconds(10));
+            throw new Exception("An unexpected inference error must propagate");
+        }
+        catch (IOException ex) when (ReferenceEquals(ex, fault))
+        {
+            Require(finished == 1 && await File.ReadAllTextAsync(output) == previous,
+                "After draining workers, the fatal error propagates and preserves the previous output");
+        }
     }
 
     private static void Require(bool condition, string message)

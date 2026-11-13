@@ -25,9 +25,11 @@ public sealed class InferenceService : IDisposable
         _ => throw new ArgumentOutOfRangeException(nameof(stage))
     };
 
-    public string? GetStageUnavailableReason(PipelineStage stage, string modelPath)
+    public string? GetStageUnavailableReason(PipelineStage stage, string modelPath) =>
+        GetStageUnavailableReason(GetModelRole(stage), modelPath);
+
+    private string? GetStageUnavailableReason(ModelRole role, string modelPath)
     {
-        var role = GetModelRole(stage);
         string name = role == ModelRole.Front ? "앞모델" : "뒷모델";
         if (!File.Exists(modelPath)) return $"{name} GGUF 파일이 필요합니다.";
         try
@@ -46,16 +48,14 @@ public sealed class InferenceService : IDisposable
         }
     }
 
-    public Task<InferenceResult> RunStageAsync(PipelineStage stage, string modelPath, string input, int maxTokens)
-    {
-        var reason = GetStageUnavailableReason(stage, modelPath);
-        if (reason != null) throw new InvalidOperationException(reason);
-        return GenerateAsync(GetModelRole(stage), modelPath, input, maxTokens);
-    }
+    public Task<InferenceResult> RunStageAsync(PipelineStage stage, string modelPath, string input, int maxTokens) =>
+        GenerateAsync(GetModelRole(stage), modelPath, input, maxTokens);
 
     private Task<InferenceResult> GenerateAsync(ModelRole role, string path, string input, int maxTokens) =>
         Task.Run(() =>
         {
+            if (role != ModelRole.Single && GetStageUnavailableReason(role, path) is { } reason)
+                throw new InvalidOperationException(reason);
             lock (_lock)
             {
                 ObjectDisposedException.ThrowIf(_disposed, this);

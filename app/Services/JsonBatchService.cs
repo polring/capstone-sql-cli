@@ -15,57 +15,101 @@ internal static class JsonBatchService
         Action<int, int>? onProgress = null) =>
         ProcessAsync(path, infer, CancellationToken.None, onProgress);
 
-    internal static async Task<JsonBatchResult> ProcessAsync(string path,
+    internal static Task<JsonBatchResult> ProcessAsync(string path,
         Func<string, Task<IReadOnlyList<string>>> infer, CancellationToken cancellationToken,
+        Action<int, int>? onProgress = null) =>
+        ProcessAsync(path, [infer], cancellationToken, onProgress);
+
+    internal static async Task<JsonBatchResult> ProcessAsync(string path,
+        IReadOnlyList<Func<string, Task<IReadOnlyList<string>>>> inferWorkers, CancellationToken cancellationToken,
         Action<int, int>? onProgress = null)
     {
+        if (inferWorkers.Count == 0)
+            throw new ArgumentException("추론 작업자가 한 개 이상 필요합니다.", nameof(inferWorkers));
         string source = Path.GetFullPath(path);
         var (isArray, rows, isEvaluation) = await Task.Run(() => ReadDataset(source));
+        int workerCount = Math.Min(inferWorkers.Count, rows.Count);
+        var active = new List<Task<RowPrediction>>(workerCount);
+        int nextRow = 0;
         int processed = 0;
         int matched = 0;
         int succeeded = 0;
-        onProgress?.Invoke(0, rows.Count);
-        foreach (var row in rows)
-        {
-            if (cancellationToken.IsCancellationRequested) break;
-            IReadOnlyList<string> predictions;
-            try
-            {
-                predictions = await infer(row["input"]!.GetValue<string>());
-            }
-            catch (Exception ex) when (ex is FormatException || ex.GetType() == typeof(InvalidOperationException) ||
-                                       ex.GetType() == typeof(ArgumentException))
-            {
-                // The tokenizer and inference engine report unsupported inputs with these exceptions.
-                predictions = [];
-            }
 
-            var outputs = predictions.Where(s => !string.IsNullOrWhiteSpace(s)).Distinct(StringComparer.Ordinal).ToArray();
-            if (outputs.Length > 0) succeeded++;
-            if (isEvaluation)
+        void StartNext(int worker)
+        {
+            if (nextRow >= rows.Count || cancellationToken.IsCancellationRequested) return;
+            int index = nextRow++;
+            string input = rows[index]["input"]!.GetValue<string>();
+            active.Add(PredictRowAsync(index, worker, input, inferWorkers[worker]));
+        }
+
+        onProgress?.Invoke(0, rows.Count);
+        try
+        {
+            for (int worker = 0; worker < workerCount; worker++)
+                StartNext(worker);
+
+            while (active.Count > 0)
             {
-                bool correct = outputs.Contains(row["output"]!.GetValue<string>(), StringComparer.Ordinal);
-                row["matched"] = correct;
-                if (correct) matched++;
-            }
-            else
-            {
-                row["output"] = outputs.Length switch
+                var completed = await Task.WhenAny(active);
+                active.Remove(completed);
+                var prediction = await completed;
+                var row = rows[prediction.RowIndex];
+                var outputs = prediction.Outputs;
+                if (outputs.Length > 0) succeeded++;
+                if (isEvaluation)
                 {
-                    0 => null,
-                    1 => JsonValue.Create(outputs[0]),
-                    _ => new JsonArray(outputs.Select(s => (JsonNode?)JsonValue.Create(s)).ToArray())
-                };
+                    bool correct = outputs.Contains(row["output"]!.GetValue<string>(), StringComparer.Ordinal);
+                    row["matched"] = correct;
+                    if (correct) matched++;
+                }
+                else
+                {
+                    row["output"] = outputs.Length switch
+                    {
+                        0 => null,
+                        1 => JsonValue.Create(outputs[0]),
+                        _ => new JsonArray(outputs.Select(s => (JsonNode?)JsonValue.Create(s)).ToArray())
+                    };
+                }
+                processed++;
+                onProgress?.Invoke(processed, rows.Count);
+                StartNext(prediction.Worker);
             }
-            processed++;
-            onProgress?.Invoke(processed, rows.Count);
+        }
+        catch
+        {
+            // Finish other active calls before their owner disposes the model handles.
+            Task draining = Task.WhenAll(active);
+            await draining.ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
+            throw;
         }
 
         string suffix = isEvaluation ? "_eval.json" : "_infer.json";
         string destination = Path.Combine(Path.GetDirectoryName(source)!, Path.GetFileNameWithoutExtension(source) + suffix);
-        // Finish the atomic save even when stopped. With no completed rows, preserve any previous result.
+        // Rows were assigned in input order and all started rows have finished.
         if (processed > 0) await Task.Run(() => SaveResult(destination, isArray, rows, processed));
         return new JsonBatchResult(processed > 0 ? destination : "", rows.Count, processed, matched, succeeded, isEvaluation);
+    }
+
+    private readonly record struct RowPrediction(int RowIndex, int Worker, string[] Outputs);
+
+    private static async Task<RowPrediction> PredictRowAsync(int index, int worker, string input,
+        Func<string, Task<IReadOnlyList<string>>> infer)
+    {
+        IReadOnlyList<string> predictions;
+        try
+        {
+            predictions = await infer(input).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is FormatException || ex.GetType() == typeof(InvalidOperationException) ||
+                                   ex.GetType() == typeof(ArgumentException))
+        {
+            // The tokenizer and inference engine report unsupported inputs with these exceptions.
+            predictions = [];
+        }
+        var outputs = predictions.Where(s => !string.IsNullOrWhiteSpace(s)).Distinct(StringComparer.Ordinal).ToArray();
+        return new RowPrediction(index, worker, outputs);
     }
 
     private static (bool IsArray, List<JsonObject> Rows, bool IsEvaluation) ReadDataset(string path)

@@ -621,7 +621,7 @@
               <Button Grid.Column="3" Command="{x:Bind ViewModel.CancelJsonBatchCommand}"
                       Visibility="{x:Bind ViewModel.IsJsonBatchRunning, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}"
                       Width="34" Height="34" Padding="0" CornerRadius="17" Background="Transparent" BorderThickness="0"
-                      AutomationProperties.Name="현재 질문 완료 후 JSON 처리 중단" ToolTipService.ToolTip="현재 질문 완료 후 중단">
+                      AutomationProperties.Name="진행 중인 질문을 모두 마친 뒤 JSON 처리 중단" ToolTipService.ToolTip="진행 중인 질문을 모두 마친 뒤 중단">
                 <Border Width="28" Height="28" CornerRadius="14" Background="{ThemeResource ComposerGradientBrush}">
                   <Rectangle Width="10" Height="10" RadiusX="1" RadiusY="1"
                              Fill="{ThemeResource TextOnAccentFillColorPrimaryBrush}" />

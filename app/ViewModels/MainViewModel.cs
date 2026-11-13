@@ -20,8 +20,9 @@ namespace SqlApp.ViewModels
         private readonly InferenceService _inferenceService;
         private readonly SessionStorageService _sessionStorageService;
         private readonly List<AssetBundle> _allBundles;
-        private readonly Func<PipelineStage, string, string, int, Task<InferenceResult>> _runStage;
-        private readonly Func<string, string, int, Task<InferenceResult>> _runSingle;
+        private readonly Func<PipelineStage, string, string, int, Task<InferenceResult>>? _runStageOverride;
+        private readonly Func<string, string, int, Task<InferenceResult>>? _runSingleOverride;
+        private readonly int _batchWorkerCount;
         private CancellationTokenSource? _batchCancellation;
         private ConversationSession? _batchSession;
         internal Task Initialization { get; }
@@ -65,7 +66,7 @@ namespace SqlApp.ViewModels
             if (SelectedSession == _batchSession)
                 StatusMessage = BatchState == JsonBatchState.Preparing
                     ? "첫 질문을 시작하기 전에 중단합니다."
-                    : "현재 질문을 마친 뒤 중단합니다.";
+                    : "진행 중인 질문을 모두 마친 뒤 중단합니다.";
             BatchState = JsonBatchState.Stopping;
             _batchCancellation.Cancel();
         }
@@ -289,13 +290,15 @@ namespace SqlApp.ViewModels
 
         internal MainViewModel(List<AssetBundle> bundles, SessionStorageService sessionStorage, InferenceService inference,
             Func<PipelineStage, string, string, int, Task<InferenceResult>>? runStage = null,
-            Func<string, string, int, Task<InferenceResult>>? runSingle = null)
+            Func<string, string, int, Task<InferenceResult>>? runSingle = null, int? batchWorkerCount = null)
         {
             _allBundles = bundles;
             _sqlExecutionService = new SqlExecutionService();
             _inferenceService = inference;
-            _runStage = runStage ?? inference.RunStageAsync;
-            _runSingle = runSingle ?? inference.RunQueryAsync;
+            _runStageOverride = runStage;
+            _runSingleOverride = runSingle;
+            _batchWorkerCount = batchWorkerCount ?? Math.Min(Environment.ProcessorCount, 4);
+            ArgumentOutOfRangeException.ThrowIfLessThan(_batchWorkerCount, 1, nameof(batchWorkerCount));
             _sessionStorageService = sessionStorage;
             Initialization = LoadInitialSessionsAsync();
         }
@@ -442,12 +445,21 @@ namespace SqlApp.ViewModels
             return [];
         }
 
-        private Task<PipelineRun> RunPipelineAsync(AssetBundle bundle, StageRange range, string input,
-            IReadOnlyList<TableSchemaInfo> schema, int maxTokens, string sessionId, Guid messageId) =>
-            PipelineRunner.RunAsync(range, input, "", bundle.DirectoryPath, bundle.DbPath, schema,
-                (stage, prompt) => _runStage(stage,
+        private Task<PipelineRun> RunPipelineAsync(InferenceService inference, AssetBundle bundle, StageRange range,
+            string input, IReadOnlyList<TableSchemaInfo> schema, int maxTokens, string sessionId, Guid messageId)
+        {
+            var runStage = _runStageOverride ?? inference.RunStageAsync;
+            return PipelineRunner.RunAsync(range, input, "", bundle.DirectoryPath, bundle.DbPath, schema,
+                (stage, prompt) => runStage(stage,
                     stage == PipelineStage.Front ? bundle.FrontModelPath : bundle.BackModelPath, prompt, maxTokens),
                 sessionId, messageId);
+        }
+
+        private Task<InferenceResult> RunSingleAsync(InferenceService inference, AssetBundle bundle, string input, int maxTokens)
+        {
+            var runSingle = _runSingleOverride ?? inference.RunQueryAsync;
+            return runSingle(bundle.ModelPath, input, maxTokens);
+        }
 
         private static void SetDefaultTitle(ConversationSession session, string title)
         {
@@ -500,7 +512,7 @@ namespace SqlApp.ViewModels
                 if (dual)
                 {
                     var schema = await GetPipelineSchemaAsync(bundle, range);
-                    var run = await RunPipelineAsync(bundle, range, chatInput, schema, maxTokens, session.Id, assistantMsg.Id);
+                    var run = await RunPipelineAsync(_inferenceService, bundle, range, chatInput, schema, maxTokens, session.Id, assistantMsg.Id);
                     assistantMsg.PipelineRun = run;
                     assistantMsg.ComputeTimeMs = run.ComputeTimeMs;
                     assistantMsg.Sql = run.FinalSql;
@@ -509,7 +521,7 @@ namespace SqlApp.ViewModels
                 }
                 else
                 {
-                    var result = await _runSingle(bundle.ModelPath, chatInput, maxTokens);
+                    var result = await RunSingleAsync(_inferenceService, bundle, chatInput, maxTokens);
                     assistantMsg.ComputeTimeMs = result.ComputeTimeMs;
                     assistantMsg.Sql = result.Text;
                     assistantMsg.StopReason = result.StopReason;
@@ -633,6 +645,7 @@ namespace SqlApp.ViewModels
             session.Messages.Add(new ChatMessage { Sender = MessageSender.User, Text = $"JSON 첨부 · {fileName}" });
             var summary = new ChatMessage { Sender = MessageSender.Assistant };
             using var cancellation = new CancellationTokenSource();
+            var additionalWorkers = new List<InferenceService>();
             _batchCancellation = cancellation;
             _batchSession = session;
             IsGenerating = true;
@@ -641,9 +654,14 @@ namespace SqlApp.ViewModels
             try
             {
                 var schema = await GetPipelineSchemaAsync(bundle, range);
-                var result = await JsonBatchService.ProcessAsync(filePath,
-                    input => InferBatchRowAsync(bundle, range, input, schema, maxTokens, session.Id),
-                    cancellation.Token,
+                // Each service serializes its own model handle. Keep the first worker's warmed models for reuse.
+                for (int i = 1; i < _batchWorkerCount; i++)
+                    additionalWorkers.Add(new InferenceService());
+                var workers = new List<Func<string, Task<IReadOnlyList<string>>>>(_batchWorkerCount);
+                string sessionId = session.Id;
+                foreach (var worker in additionalWorkers.Prepend(_inferenceService))
+                    workers.Add(input => InferBatchRowAsync(worker, bundle, range, input, schema, maxTokens, sessionId));
+                var result = await JsonBatchService.ProcessAsync(filePath, workers, cancellation.Token,
                     (done, total) =>
                     {
                         if (done == total) BatchState = JsonBatchState.Saving;
@@ -669,6 +687,7 @@ namespace SqlApp.ViewModels
             }
             finally
             {
+                foreach (var worker in additionalWorkers) worker.Dispose();
                 _batchCancellation = null;
                 _batchSession = null;
                 BatchState = JsonBatchState.Idle;
@@ -679,16 +698,17 @@ namespace SqlApp.ViewModels
             }
         }
 
-        private async Task<IReadOnlyList<string>> InferBatchRowAsync(AssetBundle bundle, StageRange range,
-            string input, IReadOnlyList<TableSchemaInfo> schema, int maxTokens, string sessionId)
+        private async Task<IReadOnlyList<string>> InferBatchRowAsync(InferenceService inference, AssetBundle bundle,
+            StageRange range, string input, IReadOnlyList<TableSchemaInfo> schema, int maxTokens, string sessionId)
         {
             if (!bundle.IsDual)
             {
-                var single = await _runSingle(bundle.ModelPath, input, maxTokens);
+                var single = await RunSingleAsync(inference, bundle, input, maxTokens).ConfigureAwait(false);
                 return [single.Text];
             }
 
-            var run = await RunPipelineAsync(bundle, range, input, schema, maxTokens, sessionId, Guid.NewGuid());
+            var run = await RunPipelineAsync(inference, bundle, range, input, schema, maxTokens, sessionId, Guid.NewGuid())
+                .ConfigureAwait(false);
             if (run.Error.Length > 0) throw new InvalidOperationException(run.Error);
             if (range.End != PipelineStage.Postprocessor) return [run.Steps[^1].Output];
             return run.FinalSqlCandidates.Where(c => c.Error.Length == 0).Select(c => c.Sql).ToArray();
