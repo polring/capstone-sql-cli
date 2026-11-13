@@ -10,7 +10,7 @@
 | 화면 구성 | `MainPage.xaml`은 메인 페이지의 레이아웃과 바인딩을, `MainPage.xaml.cs`는 페이지 이벤트를 담당합니다. 구간 선택 컨트롤은 `Controls/StageRangeSlider.xaml`과 같은 이름의 코드 비하인드에 모여 있습니다. [메인 페이지](MainPage.xaml) · [구간 선택 컨트롤](Controls/StageRangeSlider.xaml) · [바인딩 변환기](Converters/ValueConverters.cs) |
 | 화면 상태와 데이터 | `MainViewModel.cs`가 상태와 명령을 관리하고 `MainViewModel.Platform.cs`의 기본 생성자가 실제 서비스를 연결합니다. 대화·메시지, 매핑 후보, 파이프라인 실행 결과의 자료형은 `Models/`에 있습니다. [뷰모델](ViewModels/MainViewModel.cs) · [서비스 연결](ViewModels/MainViewModel.Platform.cs) · [데이터 모델](Models/) |
 | 서비스와 파이프라인 | 에셋 탐색, 대화 저장, SQLite 접근, 모델 추론은 `Services/`에 각각 분리되어 있습니다. `Services/Pipeline/`에는 이중 모델의 단계 순서를 제어하는 `PipelineRunner.cs`, 매핑과 복원을 담당하는 `Mapper.cs`와 `Postprocessor.cs`, 공통 태그 규칙을 정의하는 `SchemaTags.cs`가 있습니다. [서비스](Services/) · [파이프라인](Services/Pipeline/) |
-| C 추론기 연동 | `Interop/SqlEngine/`에서 `GgufContract.cs`는 GGUF 메타데이터를 읽고 `SqlTokenizer.cs`는 문자열과 토큰 ID를 변환합니다. `SqlModel.cs`는 C API를 호출하고 네이티브 모델 핸들의 수명을 관리합니다. [C# 연동 코드](Interop/SqlEngine/) · [C API 선언](../native/sql_engine/sql_engine.h) |
+| C 추론기 연동 | `GgufContract.cs`가 GGUF 어휘를 읽고 실행 역할에 맞는 토크나이저를 선택합니다. 단일 모델과 앞모델은 각자 같은 규칙으로 입력을 분할하고, 뒷모델은 학습 어휘에 등록된 SQL 태그를 한 토큰으로 읽습니다. `SqlModel.cs`는 C API 호출과 모델 핸들 수명을 관리합니다. [단일 모델](Interop/SqlEngine/SingleModelTokenizer.cs) · [앞모델](Interop/SqlEngine/FrontModelTokenizer.cs) · [뒷모델](Interop/SqlEngine/BackModelTokenizer.cs) · [C API 선언](../native/sql_engine/sql_engine.h) |
 
 ## 질문을 보낼 때
 
@@ -23,7 +23,7 @@
 | 매핑 | `Mapper.MapCandidates`는 원문과 앞모델의 태그 문장을 대조합니다. 후보마다 `Tables`에 실제 테이블명, `Columns`에 컬럼명과 유형, `Values`에 각 값 태그에 대응하는 원문 문자열을 저장합니다. 모든 값 태그가 같은 문자열 조합을 가리키면 후보 하나로 합칩니다. 뒷모델 입력은 모든 후보가 공유합니다. [매퍼](Services/Pipeline/Mapper.cs) · [복원 기록](Models/MappingRecord.cs) |
 | SQL 복원 | 뒷모델이 한 번 생성한 태그 SQL을 `Postprocessor.RestoreCandidates`가 각 복원 기록에 적용합니다. 최종 SQL 문자열이 같으면 한 항목의 `MappingIndices`에 해당 복원 기록의 인덱스를 모읍니다. 인덱스는 0부터, 화면의 후보 번호는 1부터 셉니다. 복원 실패 사유도 해당 후보에 남깁니다. [후처리기](Services/Pipeline/Postprocessor.cs) · [실행 결과 자료구조](Models/PipelineRun.cs) |
 
-모델이 생성 한도나 문맥 길이에 도달하면 단일 모드는 생성된 텍스트와 종료 사유를 채팅에 표시합니다. 이중 모드는 해당 단계에 부분 출력을 남기고 다음 단계로의 전달을 멈춥니다. 모델 계산 시간은 단계별로 기록하고 응답에는 그 합계를 표시합니다. [GGUF 계약과 시간 측정](../CONTRACT.md)
+모델이 생성 한도나 문맥 길이에 도달하면 단일 모드는 생성된 텍스트와 종료 사유를 채팅에 표시합니다. 이중 모드는 해당 단계에 부분 출력을 남기고 다음 단계로의 전달을 멈춥니다. 모델 계산 시간은 단계별로 기록하고 응답에는 그 합계를 표시합니다. [추론 엔진과 시간 측정](../native/sql_engine/sql_engine.c)
 
 ## SQL 카드와 조회 결과
 

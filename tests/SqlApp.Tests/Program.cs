@@ -225,16 +225,9 @@ try
     await SqlQueryChecks.VerifyChatAsync(temp.FullName, db);
     await ViewModelChecks.RunAsync(temp.FullName, assets, example, expected);
     ContractV2Checks.Verify(Path.Combine(root.FullName, "fixtures", "v2"), temp.FullName);
+    await BackContractChecks.VerifyAsync(Path.Combine(root.FullName, "fixtures"));
     using var inference = new InferenceService();
     Require(inference.GetStageUnavailableReason(PipelineStage.Front, "") != null, "Missing model availability");
-    var incompatible = Path.Combine(temp.FullName, "other-version.gguf");
-    byte[] bytes = File.ReadAllBytes(fixtureModel);
-    var key = "capstone_sql.contract_version"u8;
-    int valueOffset = bytes.AsSpan().IndexOf(key) + key.Length + sizeof(uint);
-    Require(valueOffset > key.Length + sizeof(uint), "Fixture missing contract_version metadata");
-    System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(valueOffset), 99);
-    File.WriteAllBytes(incompatible, bytes);
-    Require(inference.GetStageUnavailableReason(PipelineStage.Back, incompatible)?.Contains("v99") == true, "Explain unsupported model contract");
     // The base fixture's independent full-prefix predictions for these literal prompts differ.
     foreach (var (input, expectedText) in new[] { ("Show <TABLE1.COL2>", "|||"), ("show <table1.col2>", "|::") })
     {

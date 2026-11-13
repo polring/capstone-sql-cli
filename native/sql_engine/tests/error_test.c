@@ -165,10 +165,10 @@ static void test_corrupted_files(TestContext *context, const ByteBuffer *fixture
     free(model.data);
 
     model = copy_buffer(fixture);
-    size_t position = find_after(&model, "general.architecture", 0) + 20;
-    position = find_after(&model, "capstone_sql", position) - strlen("capstone_sql");
+    /* The string value starts after its uint32 type and uint64 length. */
+    size_t position = find_after(&model, "general.architecture", 0) + 4 + 8;
     memcpy(model.data + position, "other_model!", 12);
-    expect_file_rejected(context, "architecture", &model, "");
+    expect_file_rejected(context, "architecture", &model, "unsupported architecture");
     free(model.data);
 
     size_t name_end = descriptor_position(fixture, "embedding.embedding.weight");
@@ -270,8 +270,10 @@ static void test_incompatible_config(TestContext *context, const ByteBuffer *fix
         free(model.data);
     }
     ByteBuffer model = copy_buffer(fixture);
-    put_uint32(&model, find_after(&model, "capstone_sql.contract_version", 0) + 4, 1);
-    expect_file_rejected(context, "contract v1", &model, "re-export as version 2");
+    const char *key = "general.alignment";
+    model.data[find_after(&model, key, 0) - strlen(key)] = 'x';
+    expect_file_rejected(context, "missing required alignment", &model,
+                         "incomplete or incompatible config");
     free(model.data);
 }
 

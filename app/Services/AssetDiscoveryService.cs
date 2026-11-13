@@ -18,14 +18,12 @@ namespace SqlApp.Services
         public bool HasPreprocessor => false;
 
         public int Stage { get; set; }
-        public int Contract { get; set; }
-        public bool IsExactContract { get; set; }
+        public bool IsReleaseCandidate => Name.Contains("-rc", StringComparison.OrdinalIgnoreCase);
     }
 
     public class AssetDiscoveryService
     {
         private static readonly Regex StageRegex = new(@"stage(\d+)", RegexOptions.IgnoreCase | RegexOptions.Compiled);
-        private static readonly Regex ContractRegex = new(@"contract(\d+)", RegexOptions.IgnoreCase | RegexOptions.Compiled);
         internal static StringComparison PathComparison => OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
 
         private static string FindAssetsRoot()
@@ -122,14 +120,6 @@ namespace SqlApp.Services
                 bundle.Stage = s;
             }
 
-            var contractMatch = ContractRegex.Match(dirName);
-            if (contractMatch.Success && int.TryParse(contractMatch.Groups[1].Value, out int c))
-            {
-                bundle.Contract = c;
-            }
-
-            bundle.IsExactContract = !dirName.Contains("-rc", StringComparison.OrdinalIgnoreCase);
-
             return bundle;
         }
 
@@ -158,11 +148,9 @@ namespace SqlApp.Services
                 }
             }
 
-            // Sort: 1) Stage DESC, 2) Contract DESC, 3) Exact contract first
             return bundles
                 .OrderByDescending(b => b.Stage)
-                .ThenByDescending(b => b.Contract)
-                .ThenByDescending(b => b.IsExactContract)
+                .ThenBy(b => b.IsReleaseCandidate)
                 .ThenBy(b => b.Name, StringComparer.Ordinal)
                 .ToList();
         }

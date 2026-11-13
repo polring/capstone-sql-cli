@@ -54,21 +54,20 @@ capstone-sql-cli/
 │   ├── v2/                       # GGUF 계약 검증용 소형 모델과 기준 출력
 │   └── dual/                     # 이중 모델 파이프라인의 입력·기대 결과 JSON
 ├── tests/SqlApp.Tests/           # 독립 실행형 .NET 회귀·통합 테스트 프로젝트
-├── .github/workflows/test.yml    # Linux에서 C 추론기 빌드·테스트·서식 검사
-└── CONTRACT.md                   # GGUF 형식과 C API 계약
+└── .github/workflows/test.yml    # Linux에서 C 추론기 빌드·테스트·서식 검사
 ```
 
 CMake는 추론 라이브러리를 빌드해 `app/runtimes/<RID>/native/`에 복사합니다. 앱 프로젝트는 대상 플랫폼에 맞는 라이브러리를 빌드·배포 출력에 포함합니다. [네이티브 빌드 설정](native/CMakeLists.txt) · [앱 프로젝트 설정](app/SqlApp.csproj)
 
 `assets/`의 모델·DB는 Git에서 제외합니다. `fixtures/`의 소형 모델과 JSON은 테스트 입력으로 저장소에 포함합니다. C# 테스트 프로젝트는 솔루션과 별도로 앱의 모델·서비스·네이티브 연동 소스를 직접 컴파일합니다. [테스트 프로젝트 설정](tests/SqlApp.Tests/SqlApp.Tests.csproj)
 
-[앱 소스 구조](app/ReadMe.md#앱-소스-구조) · [GGUF 계약과 C API](CONTRACT.md)
+[앱 소스 구조](app/ReadMe.md#앱-소스-구조) · [GGUF 판독기](app/Interop/SqlEngine/GgufContract.cs) · [C 추론 API](native/sql_engine/sql_engine.h)
 
 ## 2. 모델과 DB 받기
 
-다운로드 스크립트는 같은 릴리스의 `model.gguf`와 `shop.db`를 `assets/<태그>/`에 함께 저장합니다. 태그를 생략하면 공개된 `stage<N>-contract2` 계열에서 가장 높은 단계를 고릅니다. 같은 단계에서는 정식 태그, 그다음은 번호가 큰 RC를 우선합니다. 두 파일의 SHA-256을 모두 확인한 뒤 설치합니다. [학습 저장소 릴리스](https://github.com/polring/capstone-design-1/releases)
+다운로드 스크립트는 같은 릴리스의 `model.gguf`와 `shop.db`를 `assets/<태그>/`에 함께 저장합니다. 태그를 생략하면 공개된 stage 릴리스에서 가장 높은 단계를 고릅니다. 같은 단계에서는 정식 태그, 그다음은 번호가 큰 RC를 우선합니다. 두 파일의 SHA-256을 모두 확인한 뒤 설치합니다. [학습 저장소 릴리스](https://github.com/polring/capstone-design-1/releases)
 
-앱은 작업 폴더와 앱 실행 폴더의 상위 경로에서 `assets/`를 찾습니다. **단일 모델**에서는 모델과 DB가 함께 들어 있는 폴더를 표시합니다. 새 대화는 stage와 contract 번호가 높은 폴더를 우선하며, 두 번호가 같으면 정식 태그를 우선합니다.
+앱은 작업 폴더와 앱 실행 폴더의 상위 경로에서 `assets/`를 찾습니다. **단일 모델**에서는 모델과 DB가 함께 들어 있는 폴더를 표시합니다. 새 대화는 stage 번호가 높은 폴더를 우선하며, 같은 단계에서는 정식 태그를 우선합니다.
 
 다른 경로에 두 파일이 있다면 **폴더 탐색**으로 해당 폴더를 선택하세요. 그 폴더가 목록에 추가되고 모델과 DB가 현재 대화에 함께 적용됩니다. 앱을 다시 열면 저장된 대화의 폴더 경로를 확인해 복원합니다.
 

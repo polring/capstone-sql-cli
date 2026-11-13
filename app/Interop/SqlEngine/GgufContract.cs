@@ -2,6 +2,8 @@ using System.Text;
 
 namespace SqlApp.Interop.SqlEngine;
 
+internal enum ModelRole { Single, Front, Back }
+
 internal static class GgufContract
 {
     private const string Prefix = "capstone_sql.";
@@ -9,41 +11,24 @@ internal static class GgufContract
     internal const int MaxVocab = 131072;
     internal const int MaxTokenBytes = 1 << 20;
 
-    // Folder discovery only needs the architecture and contract version.
-    internal static int ReadVersion(string path)
-    {
-        using var reader = new BinaryReader(File.OpenRead(path), Encoding.UTF8);
-        int count = ReadHeader(reader);
-        string? architecture = null;
-        int? version = null;
-        for (int i = 0; i < count; i++)
-        {
-            string key = ReadString(reader);
-            uint type = reader.ReadUInt32();
-            if (key == "general.architecture" && type == 8)
-                architecture = ReadString(reader);
-            else if (key == "capstone_sql.contract_version" && type == 4)
-                version = checked((int)reader.ReadUInt32());
-            else
-                SkipField(reader, type);
-            if (architecture != null && version.HasValue)
-            {
-                if (architecture != "capstone_sql") throw new InvalidDataException("지원하지 않는 GGUF 아키텍처입니다.");
-                return version.Value;
-            }
-        }
-        throw new InvalidDataException("GGUF에서 capstone_sql 계약 정보를 찾을 수 없습니다.");
-    }
+    private static readonly string[] RequiredFields =
+    [
+        "general.architecture", "general.alignment", Prefix + "vocab_size", Prefix + "dim",
+        Prefix + "layers", Prefix + "heads", Prefix + "ffn_dim", Prefix + "context",
+        Prefix + "eps", Prefix + "theta", Tokenizer + "seeds", Tokenizer + "merges",
+        Tokenizer + "pad_id", Tokenizer + "bos_id", Tokenizer + "eos_id", Tokenizer + "sep_id",
+        Tokenizer + "seed_base", Tokenizer + "merge_base"
+    ];
 
-    internal static SqlTokenizer ReadTokenizer(string path)
+    internal static BpeCodec ReadTokenizer(string path, ModelRole role)
     {
         using var reader = new BinaryReader(File.OpenRead(path), Encoding.UTF8);
         int count = ReadHeader(reader);
-        if (count != 19) throw new InvalidDataException("capstone_sql v2 메타데이터가 필요합니다.");
         var seen = new HashSet<string>(StringComparer.Ordinal);
         var integers = new Dictionary<string, int>(StringComparer.Ordinal);
         string[] seeds = [];
         BpeMerge[] merges = [];
+        int[]? sqlIds = null;
         for (int i = 0; i < count; i++)
         {
             string key = ReadString(reader);
@@ -60,6 +45,10 @@ internal static class GgufContract
                     seeds = new string[seedCount];
                     for (int j = 0; j < seeds.Length; j++) seeds[j] = ReadString(reader);
                     break;
+                case Tokenizer + "sql_ids":
+                    sqlIds = new int[ReadArrayCount(reader, type, 4, MaxVocab)];
+                    for (int j = 0; j < sqlIds.Length; j++) sqlIds[j] = ReadInteger(reader);
+                    break;
                 case Tokenizer + "merges":
                     int entries = ReadArrayCount(reader, type, 4, MaxVocab * 3);
                     if (entries % 3 != 0) throw new InvalidDataException("GGUF merge 배열 길이가 올바르지 않습니다.");
@@ -71,7 +60,7 @@ internal static class GgufContract
                     if (type != 6) throw new InvalidDataException($"GGUF float32 값이 필요합니다: {key}");
                     reader.ReadSingle(); // Numerical constraints are validated by the compute engine.
                     break;
-                case "general.alignment" or Prefix + "contract_version" or Prefix + "vocab_size" or
+                case "general.alignment" or Prefix + "vocab_size" or
                      Prefix + "dim" or Prefix + "layers" or Prefix + "heads" or Prefix + "ffn_dim" or Prefix + "context" or
                      Tokenizer + "pad_id" or Tokenizer + "bos_id" or Tokenizer + "eos_id" or Tokenizer + "sep_id" or
                      Tokenizer + "seed_base" or Tokenizer + "merge_base":
@@ -79,15 +68,25 @@ internal static class GgufContract
                     integers.Add(key, ReadInteger(reader));
                     break;
                 default:
-                    throw new InvalidDataException($"지원하지 않는 GGUF 메타데이터: {key}");
+                    SkipField(reader, type);
+                    break;
             }
         }
-        if (integers[Prefix + "contract_version"] != 2)
-            throw new InvalidDataException("capstone_sql 계약 v2 토크나이저가 필요합니다.");
-        return new SqlTokenizer(integers[Prefix + "vocab_size"], integers[Prefix + "context"],
+        foreach (string required in RequiredFields)
+            if (!seen.Contains(required)) throw new InvalidDataException($"필수 GGUF 메타데이터가 없습니다: {required}");
+        if (integers["general.alignment"] != 32) throw new InvalidDataException("32바이트 GGUF 정렬이 필요합니다.");
+        var vocabulary = new BpeVocabulary(integers[Prefix + "vocab_size"], integers[Prefix + "context"],
             integers[Tokenizer + "pad_id"], integers[Tokenizer + "bos_id"],
             integers[Tokenizer + "eos_id"], integers[Tokenizer + "sep_id"],
-            integers[Tokenizer + "seed_base"], integers[Tokenizer + "merge_base"], seeds, merges);
+            integers[Tokenizer + "seed_base"], integers[Tokenizer + "merge_base"], seeds, merges, sqlIds);
+        BackModelTokenizer.ValidateVocabulary(vocabulary, role);
+        return role switch
+        {
+            ModelRole.Single => new SingleModelTokenizer(vocabulary),
+            ModelRole.Front => new FrontModelTokenizer(vocabulary),
+            ModelRole.Back => new BackModelTokenizer(vocabulary),
+            _ => throw new ArgumentOutOfRangeException(nameof(role))
+        };
     }
 
     private static int ReadHeader(BinaryReader reader)

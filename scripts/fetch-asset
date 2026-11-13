@@ -63,14 +63,14 @@ release_tags() {
 
 if [[ $tag == latest ]]; then
     tag=$(release_tags | awk '
-        /^stage[0-9]+-contract2(-rc[.-]?[0-9]*)?$/ {
+        /^stage[0-9]+(-contract[0-9]+)?(-rc[.-]?[0-9]*)?$/ {
             stage = substr($0, 6) + 0
             stable = ($0 !~ /-rc/)
             rc = $0; sub(/^.*-rc[.-]?/, "", rc)
             print stage, stable, rc+0, $0
         }
     ' | sort -k1,1nr -k2,2nr -k3,3nr | awk 'NR == 1 {print $4}')
-    [[ -n $tag ]] || die "No published stage release for GGUF contract 2"
+    [[ -n $tag ]] || die "No published stage release found"
 fi
 digests=$(curl -fsSL "$api/tags/$tag" | github_pairs name digest)
 

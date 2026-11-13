@@ -12,7 +12,10 @@ internal static class ContractV2Checks
         {
             string directory = Path.Combine(fixtureRoot, suite);
             string path = Path.Combine(directory, "model.gguf");
-            var tokenizer = GgufContract.ReadTokenizer(path);
+            var tokenizer = GgufContract.ReadTokenizer(path, ModelRole.Single);
+            var front = GgufContract.ReadTokenizer(path, ModelRole.Front);
+            Require(tokenizer is SingleModelTokenizer && front is FrontModelTokenizer, $"{suite}: model role selects tokenizer");
+            Require(front.DecodableMask.AsSpan().SequenceEqual(tokenizer.DecodableMask), $"{suite}: front output mask");
             using var model = SqlModel.Open(path);
             int count = 0;
             foreach (string line in File.ReadLines(Path.Combine(directory, "cases.txt")))
@@ -23,8 +26,14 @@ internal static class ContractV2Checks
                 switch (fields[0])
                 {
                     case "encode" when fields.Length == 3:
-                        var encoded = tokenizer.Encode(HexText(fields[1]));
-                        Require(encoded.SequenceEqual(Ints(fields[2])), $"{name}: wrong token IDs");
+                        string text = HexText(fields[1]);
+                        int[] expectedIds = Ints(fields[2]);
+                        byte[] original = Convert.FromHexString(fields[1]);
+                        foreach (var roleTokenizer in new[] { tokenizer, front })
+                        {
+                            Require(roleTokenizer.Encode(text).SequenceEqual(expectedIds), $"{name}: wrong token IDs");
+                            Require(roleTokenizer.Decode(expectedIds).AsSpan().SequenceEqual(original), $"{name}: decoded bytes");
+                        }
                         break;
                     case "logits" when fields.Length == 3:
                         int[] tokens = Ints(fields[1]);
@@ -40,6 +49,7 @@ internal static class ContractV2Checks
                     case "generate" when fields.Length == 5:
                         int limit = int.Parse(fields[1], CultureInfo.InvariantCulture);
                         string question = HexText(fields[2]);
+                        Require(front.EncodePrompt(question).SequenceEqual(tokenizer.EncodePrompt(question)), $"{name}: front prompt IDs");
                         var result = TokenGeneration.Generate(model, tokenizer, question, limit);
                         byte[] expectedBytes = Convert.FromHexString(fields[3]);
                         if (suite == "base" && question == "HELLO STOCK")
@@ -72,7 +82,7 @@ internal static class ContractV2Checks
 
     private static void VerifyGenerationRules(string path)
     {
-        var tokenizer = GgufContract.ReadTokenizer(path);
+        var tokenizer = GgufContract.ReadTokenizer(path, ModelRole.Single);
         int[] prompt = tokenizer.EncodePrompt("Show <TABLE1.COL2>");
         Require(prompt[0] == 257 && prompt[^1] == 259 &&
             tokenizer.Decode(prompt.AsSpan(1, prompt.Length - 2)).AsSpan().SequenceEqual("Show <TABLE1.COL2>"u8),
@@ -132,7 +142,7 @@ internal static class ContractV2Checks
             File.WriteAllBytes(path, bytes);
             try
             {
-                GgufContract.ReadTokenizer(path);
+                GgufContract.ReadTokenizer(path, ModelRole.Single);
             }
             catch (InvalidDataException)
             {

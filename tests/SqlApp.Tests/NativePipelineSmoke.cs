@@ -56,7 +56,7 @@ internal static class NativePipelineSmoke
             throw new InvalidOperationException($"Native home kitchen pipeline must restore both SQLs from a single back-model call: {alternatives.Error}");
     }
 
-    // A synthetic F32 contract-v2 decoder. The zero transformer block preserves its
+    // A synthetic F32 byte-BPE decoder. The zero transformer block preserves its
     // input embedding: the head maps SEP -> one output seed -> EOS. No trained data.
     internal static void WriteModel(string path, string seed)
     {
@@ -82,11 +82,10 @@ internal static class NativePipelineSmoke
         writer.Write("GGUF"u8);
         writer.Write(3u);
         writer.Write((ulong)tensors.Length);
-        writer.Write(19UL);
+        writer.Write(18UL);
 
         StringField("general.architecture", "capstone_sql");
         UIntField("general.alignment", 32);
-        UIntField("capstone_sql.contract_version", 2);
         UIntField("capstone_sql.vocab_size", vocab);
         UIntField("capstone_sql.dim", dimension);
         UIntField("capstone_sql.layers", 1);

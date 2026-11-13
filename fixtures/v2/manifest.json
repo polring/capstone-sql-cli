@@ -1,5 +1,4 @@
 {
-  "contract_version": 2,
   "files": {
     "base/model.gguf": "ce54981c51ce71929ecb9ae530d088ac9956739d33bb5027e59cd7acd19f1247",
     "base/cases.txt": "e6127ca2025ab875ba145978c2dd4f88b5267c38fb8dab3e47697d01ea92a6cd",

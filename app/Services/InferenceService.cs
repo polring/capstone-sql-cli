@@ -7,24 +7,29 @@ namespace SqlApp.Services;
 public sealed class InferenceService : IDisposable
 {
     private readonly object _lock = new();
-    private sealed record LoadedModel(string Path, DateTime Modified, long Length, SqlTokenizer Tokenizer, SqlModel Handle);
-    private enum Role { Single, Front, Back }
-    private readonly Dictionary<Role, LoadedModel> _models = new();
+    private sealed record LoadedModel(string Path, DateTime Modified, long Length, BpeCodec Tokenizer, SqlModel Handle);
+    private readonly Dictionary<ModelRole, LoadedModel> _models = new();
     private bool _disposed;
 
     public Task<InferenceResult> RunQueryAsync(string path, string question, int maxTokens)
-        => GenerateAsync(Role.Single, path, question, maxTokens);
+        => GenerateAsync(ModelRole.Single, path, question, maxTokens);
+
+    private static ModelRole GetModelRole(PipelineStage stage) => stage switch
+    {
+        PipelineStage.Front => ModelRole.Front,
+        PipelineStage.Back => ModelRole.Back,
+        _ => throw new ArgumentOutOfRangeException(nameof(stage))
+    };
 
     public string? GetStageUnavailableReason(PipelineStage stage, string modelPath)
     {
-        string name = stage == PipelineStage.Front ? "앞모델" : "뒷모델";
-        if (stage != PipelineStage.Front && stage != PipelineStage.Back)
-            throw new ArgumentOutOfRangeException(nameof(stage));
+        var role = GetModelRole(stage);
+        string name = role == ModelRole.Front ? "앞모델" : "뒷모델";
         if (!File.Exists(modelPath)) return $"{name} GGUF 파일이 필요합니다.";
         try
         {
-            int version = GgufContract.ReadVersion(modelPath);
-            return version == 2 ? null : $"{name} GGUF 계약 v{version}을 지원하는 추론기가 필요합니다.";
+            GgufContract.ReadTokenizer(modelPath, role);
+            return null;
         }
         catch (Exception ex) when (ex is IOException or InvalidDataException or OverflowException or UnauthorizedAccessException)
         {
@@ -36,10 +41,10 @@ public sealed class InferenceService : IDisposable
     {
         var reason = GetStageUnavailableReason(stage, modelPath);
         if (reason != null) throw new InvalidOperationException(reason);
-        return GenerateAsync(stage == PipelineStage.Front ? Role.Front : Role.Back, modelPath, input, maxTokens);
+        return GenerateAsync(GetModelRole(stage), modelPath, input, maxTokens);
     }
 
-    private Task<InferenceResult> GenerateAsync(Role role, string path, string input, int maxTokens) =>
+    private Task<InferenceResult> GenerateAsync(ModelRole role, string path, string input, int maxTokens) =>
         Task.Run(() =>
         {
             lock (_lock)
@@ -52,8 +57,9 @@ public sealed class InferenceService : IDisposable
                 if (!_models.TryGetValue(role, out var current) || current.Path != file.FullName
                     || current.Modified != file.LastWriteTimeUtc || current.Length != file.Length)
                 {
+                    var tokenizer = GgufContract.ReadTokenizer(file.FullName, role);
                     var next = new LoadedModel(file.FullName, file.LastWriteTimeUtc, file.Length,
-                        GgufContract.ReadTokenizer(file.FullName), SqlModel.Open(file.FullName));
+                        tokenizer, SqlModel.Open(file.FullName));
                     // The tokenizer and weights are read separately. Do not cache a pair
                     // from different revisions if the bundle is replaced during loading.
                     file.Refresh();
