@@ -1,41 +1,59 @@
-# Build outputs (C / C++ & CMake)
-build/
-build-*/
+# CMake configure, build, test and publish outputs
+/build/
+/build-*/
+/out/
+/publish/
 CMakeCache.txt
 CMakeFiles/
 cmake_install.cmake
+CTestTestfile.cmake
+Testing/
+CMakeUserPresets.json
 *.o
 *.obj
 *.a
 *.lib
+*.dll
 *.so
 *.dylib
-*.dll
 *.exe
 *.pdb
 *.ilk
 *.idb
 
+# The GUI consumes staged native libraries from CMake.
+/app/runtimes/*/native/*
+!/app/runtimes/*/native/.gitkeep
 
-# .NET & Uno Platform build outputs
-bin/
-obj/
+# .NET, Uno and local IDE state
 [Bb]in/
 [Oo]bj/
-
-# Visual Studio & IDE files
 .vs/
+.vscode/
+*.rsuser
 *.suo
 *.user
-*.userosv
+*.userosscache
 *.sln.docstates
-.vscode/
+*.binlog
+*.publishsettings
+.env
 
-# Downloaded release assets (scripts/fetch-assets: models, DB, embeddings)
-assets/
-models/
+# Local model bundles, including files fetched into a custom directory
+/assets/*
+!/assets/.gitkeep
+/models/
+*.gguf
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+!/fixtures/**/model.gguf
 
-# OS specific files
+# Local Python caches
+__pycache__/
+
+# OS metadata
 .DS_Store
 Thumbs.db
 desktop.ini

@@ -1,4 +1,97 @@
 #!/usr/bin/env bash
-# Wrapper forwarding to scripts/fetch-assets
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-exec "$SCRIPT_DIR/fetch-assets" "$@"
+# Download model.gguf and shop.db together from a training release.
+set -euo pipefail
+
+usage() {
+    echo "Usage: bash scripts/fetch-asset [TAG|latest] [OUTPUT_DIR]"
+    echo "Download both model.gguf and shop.db (default directory: assets/<release tag>/)."
+}
+
+die() { echo "fetch-asset: $*" >&2; exit 1; }
+
+repository=polring/capstone-design-1
+api="https://api.github.com/repos/$repository/releases"
+case "${1:-}" in
+    -h|--help|help) usage; exit 0 ;;
+esac
+if (( $# > 2 )); then usage >&2; exit 2; fi
+# Catch old target arguments before they can be used as a tag or a directory.
+for arg in "$@"; do
+    case "$arg" in
+        all|model|db|emb|embedding) die "Remove the '$arg' target. Both files are downloaded together." ;;
+    esac
+done
+tag=${1:-latest}
+[[ $tag =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || die "Invalid release tag: $tag"
+files=(model.gguf shop.db)
+
+if command -v sha256sum >/dev/null; then
+    checksum=(sha256sum)
+else
+    checksum=(shasum -a 256)
+fi
+
+# Print two fields from the same GitHub object. Keep quoted strings intact
+# so braces and field names in release notes cannot be mistaken for metadata.
+github_pairs() {
+    grep -Eo '"([^"\\]|\\.)*"|[{}:]|\[|\]|true|false|null' |
+        awk -v first="\"$1\"" -v second="\"$2\"" '
+            $0 == "{" { depth++ }
+            $0 == "}" {
+                if (depth in a && depth in b) print a[depth] "\t" b[depth]
+                delete a[depth]; delete b[depth]; depth--
+            }
+            previous == ":" && (key == first || key == second) {
+                value = $0; gsub(/^"|"$/, "", value)
+                if (key == first) a[depth] = value
+                else b[depth] = value
+            }
+            { if ($0 == ":") key = previous; previous = $0 }
+        '
+}
+
+release_tags() {
+    local page=1 releases count
+    while :; do
+        releases=$(curl -fsSL "$api?per_page=100&page=$page" | github_pairs tag_name draft) || return 1
+        count=$(printf '%s\n' "$releases" | awk 'NF {n++} END {print n+0}')
+        printf '%s\n' "$releases" | awk '$2 == "false" {print $1}'
+        if (( count < 100 )); then break; fi
+        page=$((page + 1))
+    done
+}
+
+if [[ $tag == latest ]]; then
+    tag=$(release_tags | awk '
+        /^stage[0-9]+-contract2(-rc[.-]?[0-9]*)?$/ {
+            stage = substr($0, 6) + 0
+            stable = ($0 !~ /-rc/)
+            rc = $0; sub(/^.*-rc[.-]?/, "", rc)
+            print stage, stable, rc+0, $0
+        }
+    ' | sort -k1,1nr -k2,2nr -k3,3nr | awk 'NR == 1 {print $4}')
+    [[ -n $tag ]] || die "No published stage release for GGUF contract 2"
+fi
+digests=$(curl -fsSL "$api/tags/$tag" | github_pairs name digest)
+
+root=$(cd -- "$(dirname -- "$0")/.." && pwd)
+output=${2:-"$root/assets/$tag"}
+mkdir -p -- "$output"
+stage=$(mktemp -d "$output/.fetch-XXXXXXXX")
+trap 'rm -f -- "$stage/model.gguf" "$stage/shop.db"; rmdir -- "$stage"' EXIT
+trap 'exit 1' HUP INT TERM
+
+for name in "${files[@]}"; do
+    [[ ! -d "$output/$name" ]] || die "Destination is a directory: $output/$name"
+    digest=$(awk -F '\t' -v file="$name" '$1 == file {print tolower($2); exit}' <<< "$digests")
+    [[ $digest =~ ^sha256:[0-9a-f]{64}$ ]] || die "Missing asset or SHA-256 digest for $name"
+    curl -fsSL "https://github.com/$repository/releases/download/$tag/$name" -o "$stage/$name"
+    actual=$("${checksum[@]}" < "$stage/$name")
+    [[ ${actual%% *} == "${digest#sha256:}" ]] || die "SHA-256 mismatch for $name"
+done
+
+# Install only after both files pass verification.
+for name in "${files[@]}"; do
+    mv -f -- "$stage/$name" "$output/$name"
+    printf 'Verified %s/%s\n' "$output" "$name"
+done

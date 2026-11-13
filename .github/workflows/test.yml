@@ -1,24 +1,15 @@
 name: tests
-
 on:
   push:
     branches: [main]
   pull_request:
 
 jobs:
-  test:
+  native:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-
-      - name: Build with CMake
-        run: |
-          cmake -B build -DCMAKE_BUILD_TYPE=Release
-          cmake --build build --config Release
-
-      - name: Run tests with CTest
-        run: ctest --test-dir build -C Release --output-on-failure
-
-      - name: Check engine formatting
-        run: clang-format --dry-run --Werror src/core/engine/loader.c src/cli/main.c tests/fixture_test.c tests/error_test.c
+      - run: cmake -S native -B build -DCMAKE_BUILD_TYPE=Release
+      - run: cmake --build build --config Release
+      - run: cmake -E chdir build ctest -C Release --output-on-failure
+      - run: clang-format --dry-run --Werror native/sql_engine/*.c native/sql_engine/*.h native/sql_engine/tests/*.c

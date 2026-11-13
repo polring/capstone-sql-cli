@@ -1,0 +1,73 @@
+<Project Sdk="Uno.Sdk">
+  <PropertyGroup>
+    <TargetFrameworks>net10.0-windows10.0.26100;net10.0-desktop</TargetFrameworks>
+
+    <TargetFrameworks Condition="!$([MSBuild]::IsOSPlatform('Windows'))">net10.0-desktop</TargetFrameworks>
+    <OutputType>Exe</OutputType>
+    <UnoSingleProject>true</UnoSingleProject>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <NoWarn>$(NoWarn);NETSDK1201;PRI257</NoWarn>
+
+    <!-- Display name -->
+    <ApplicationTitle>SqlApp</ApplicationTitle>
+    <DefaultLanguage>en-US</DefaultLanguage>
+    <!-- App Identifier -->
+    <ApplicationId>com.companyname.sqlapp</ApplicationId>
+    <!-- Versions -->
+    <ApplicationDisplayVersion>1.0</ApplicationDisplayVersion>
+    <ApplicationVersion>1</ApplicationVersion>
+    <!-- Package Publisher -->
+    <ApplicationPublisher>SqlApp</ApplicationPublisher>
+    <!-- Package Description -->
+    <Description>SqlApp powered by Uno Platform.</Description>
+    <!--
+      If you encounter this error message:
+
+        error NETSDK1148: A referenced assembly was compiled using a newer version of Microsoft.Windows.SDK.NET.dll.
+        Please update to a newer .NET SDK in order to reference this assembly.
+
+      This means that the two packages below must be aligned with the "build" version number of
+      the "Microsoft.Windows.SDK.BuildTools" package above, and the "revision" version number
+      must be the highest found in https://www.nuget.org/packages/Microsoft.Windows.SDK.NET.Ref.
+    -->
+    <!-- <WindowsSdkPackageVersion>10.0.22621.28</WindowsSdkPackageVersion> -->
+
+    <!--
+      UnoFeatures are used to quickly add and manage features enabled for your app.
+      https://aka.platform.uno/singleproject-features
+    -->
+    <UnoFeatures>
+      Mvvm;
+      SkiaRenderer;
+    </UnoFeatures>
+
+    <!-- Unpackaged .exe mode (No MSIX required) -->
+    <WindowsPackageType>None</WindowsPackageType>
+    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="9.0.2" />
+    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="3.0.5" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <EngineRid Condition="'$(RuntimeIdentifier)' != ''">$(RuntimeIdentifier)</EngineRid>
+    <EngineRid Condition="'$(EngineRid)' == ''">$(NETCoreSdkRuntimeIdentifier)</EngineRid>
+    <EngineFile Condition="$(EngineRid.StartsWith('win-'))">sql_engine.dll</EngineFile>
+    <EngineFile Condition="$(EngineRid.StartsWith('linux-'))">libsql_engine.so</EngineFile>
+    <EngineFile Condition="$(EngineRid.StartsWith('osx-'))">libsql_engine.dylib</EngineFile>
+    <EnginePath>runtimes/$(EngineRid)/native/$(EngineFile)</EnginePath>
+  </PropertyGroup>
+  <ItemGroup Condition="'$(TargetFramework)' != '' And '$(EngineFile)' != ''">
+    <None Remove="$(EnginePath)" />
+    <Content Include="$(EnginePath)" Link="$(EngineFile)"
+             CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest"
+             ExcludeFromSingleFile="true" />
+  </ItemGroup>
+  <Target Name="CheckNativeEngine" BeforeTargets="PrepareForBuild" Condition="'$(DesignTimeBuild)' != 'true' And '$(TargetFramework)' != ''">
+    <Error Condition="'$(EngineFile)' == '' Or !Exists('$(EnginePath)')"
+           Text="Build sql_engine for $(EngineRid) with CMake first. Expected $(EnginePath)." />
+  </Target>
+</Project>
