@@ -3,7 +3,8 @@ using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.IO;
 using System.Linq;
-using System.Text.Json;
+using System.Text.RegularExpressions;
+using System.Threading;
 using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
@@ -19,14 +20,30 @@ namespace SqlApp.ViewModels
         private readonly InferenceService _inferenceService;
         private readonly SessionStorageService _sessionStorageService;
         private readonly List<AssetBundle> _allBundles;
-        private readonly Func<PipelineStage, string, string, int, Task<InferenceResult>> _runStage;
+        private readonly Func<PipelineStage, string, string, int, Task<InferenceResult>>? _runStageOverride;
+        private readonly Func<string, string, int, Task<InferenceResult>>? _runSingleOverride;
+        private CancellationTokenSource? _batchCancellation;
+        private ConversationSession? _batchSession;
         internal Task Initialization { get; }
         private bool _refreshingBundleChoices;
 
         public ObservableCollection<ConversationSession> Sessions { get; } = new();
 
-        [ObservableProperty]
+        [ObservableProperty, NotifyPropertyChangedFor(nameof(JsonBatchWorkerCount)),
+         NotifyPropertyChangedFor(nameof(HasJsonAttachment)), NotifyPropertyChangedFor(nameof(PendingJsonFileName))]
         public partial ConversationSession? SelectedSession { get; set; }
+
+        public int JsonBatchWorkerCount
+        {
+            get => SelectedSession?.JsonBatchWorkerCount ?? ConversationSession.DefaultJsonBatchWorkerCount;
+            set
+            {
+                if (SelectedSession is not { } session || session.JsonBatchWorkerCount == value) return;
+                session.JsonBatchWorkerCount = value;
+                OnPropertyChanged();
+                _ = _sessionStorageService.SaveSessionsAsync(Sessions);
+            }
+        }
 
         partial void OnSelectedSessionChanged(ConversationSession? value)
         {
@@ -41,8 +58,55 @@ namespace SqlApp.ViewModels
         [ObservableProperty]
         public partial string InputText { get; set; } = string.Empty;
 
-        [ObservableProperty]
+        public bool HasJsonAttachment => SelectedSession?.PendingJsonFilePath != null;
+        public string PendingJsonFileName => Path.GetFileName(SelectedSession?.PendingJsonFilePath) ?? string.Empty;
+
+        public void AttachJsonFile(string filePath)
+        {
+            if (SelectedSession is { } session && !IsGenerating && !string.IsNullOrWhiteSpace(filePath))
+                SetJsonAttachment(session, filePath);
+        }
+
+        public void ClearJsonAttachment()
+        {
+            if (SelectedSession is { } session) SetJsonAttachment(session, null);
+        }
+
+        private void SetJsonAttachment(ConversationSession session, string? filePath)
+        {
+            if (session.PendingJsonFilePath == filePath) return;
+            session.PendingJsonFilePath = filePath;
+            if (session == SelectedSession)
+            {
+                OnPropertyChanged(nameof(HasJsonAttachment));
+                OnPropertyChanged(nameof(PendingJsonFileName));
+            }
+        }
+
+        [ObservableProperty, NotifyPropertyChangedFor(nameof(CanStartInference))]
         public partial bool IsGenerating { get; set; }
+        public bool CanStartInference => !IsGenerating;
+
+        private enum JsonBatchState { Idle, Preparing, Running, Stopping, Saving }
+
+        [ObservableProperty, NotifyPropertyChangedFor(nameof(IsJsonBatchRunning)), NotifyPropertyChangedFor(nameof(IsStoppingJsonBatch)),
+         NotifyPropertyChangedFor(nameof(CanCancelJsonBatch)), NotifyCanExecuteChangedFor(nameof(CancelJsonBatchCommand))]
+        private partial JsonBatchState BatchState { get; set; }
+        public bool IsJsonBatchRunning => BatchState != JsonBatchState.Idle;
+        public bool IsStoppingJsonBatch => BatchState == JsonBatchState.Stopping;
+        public bool CanCancelJsonBatch => BatchState is JsonBatchState.Preparing or JsonBatchState.Running;
+
+        [RelayCommand(CanExecute = nameof(CanCancelJsonBatch))]
+        public void CancelJsonBatch()
+        {
+            if (!CanCancelJsonBatch || _batchCancellation == null) return;
+            if (SelectedSession == _batchSession)
+                StatusMessage = BatchState == JsonBatchState.Preparing
+                    ? "첫 질문을 시작하기 전에 중단합니다."
+                    : "진행 중인 질문을 모두 마친 뒤 중단합니다.";
+            BatchState = JsonBatchState.Stopping;
+            _batchCancellation.Cancel();
+        }
 
         [ObservableProperty]
         public partial string StatusMessage { get; set; } = string.Empty;
@@ -58,6 +122,77 @@ namespace SqlApp.ViewModels
             : SelectedRange.Start == PipelineStage.Back ? "매퍼가 생성한 일반화 질문을 입력하세요."
             : "앞모델에 전달할 질문을 입력하세요.";
 
+        public string WelcomeDescription => !IsDualMode
+            ? "영어로 질문하면 모델이 SQL을 생성합니다. 실행을 누르면 같은 에셋 폴더의 DB에서 결과를 조회합니다."
+            : SelectedRange switch
+            {
+                { Start: PipelineStage.Back } =>
+                    "매퍼가 만든 일반화 질문을 입력하면 뒷모델이 태그 SQL을 생성합니다.",
+                { End: PipelineStage.Front } =>
+                    "영어로 질문하면 앞모델이 테이블명, 컬럼명, 조건값에 태그를 붙인 질문을 보여줍니다.",
+                { End: PipelineStage.Mapper } =>
+                    "영어로 질문하면 앞모델이 태그를 붙이고 매퍼가 테이블명과 컬럼명을 TABLE1, COL1 같은 기호로 바꾼 일반화 질문을 보여줍니다.",
+                { End: PipelineStage.Back } =>
+                    "영어로 질문하면 매퍼가 앞모델의 출력을 일반화하고, 뒷모델이 태그 SQL을 생성합니다.",
+                _ => "영어로 질문하면 두 모델과 매퍼를 거쳐 후처리기가 최종 SQL을 복원합니다. 실행을 누르면 선택한 DB에서 결과를 조회합니다."
+            };
+
+        public IReadOnlyList<string> PromptSuggestions
+        {
+            get
+            {
+                if (IsSingleMode) return
+                [
+                    "please show me information of peter.",
+                    "show me where peter lives in.",
+                    "List all products with stock quantity 10 or less."
+                ];
+                if (SelectedRange.Start == PipelineStage.Back) return
+                [
+                    "How many <TABLE1> are there?",
+                    "Show the {TABLE1.COL1, string} of each <TABLE1>.",
+                    "Show the {TABLE1.COL1, string} of <TABLE1> where the <TABLE1.COL2, numeric> is greater than [TABLE1.COL2, numeric, #1]."
+                ];
+
+                var first = CurrentSchema.FirstOrDefault();
+                string table = first?.TableName ?? "items";
+                string column = first?.Columns.FirstOrDefault()?.Split(" (", 2)[0] ?? "item_name";
+                string count = $"How many {table} are there?";
+                string total = $"What is the total number of {CurrentSchema.LastOrDefault()?.TableName ?? table}?";
+
+                // Use a numeric attribute from each table for MAX/MIN examples when available.
+                var measures = CurrentSchema.Select(t => (t.TableName, Column: FindMeasureColumn(t)))
+                    .Where(t => t.Column != null).ToArray();
+                string highest = measures.Length > 0
+                    ? $"Show the highest {measures[0].Column} of {measures[0].TableName}."
+                    : $"List the {column} of all {table}.";
+                string lowest = measures.Length > 0
+                    ? $"Show the lowest {measures[^1].Column} of {measures[^1].TableName}."
+                    : $"Show the {column} of each record in {table}.";
+                return SelectedRange.End switch
+                {
+                    PipelineStage.Front => [count, total, highest],
+                    PipelineStage.Mapper => [total, highest, lowest],
+                    PipelineStage.Back => [count, lowest, total],
+                    _ => [count, highest, lowest]
+                };
+            }
+        }
+
+        private static string? FindMeasureColumn(TableSchemaInfo table)
+        {
+            foreach (string descriptor in table.Columns)
+            {
+                string[] parts = descriptor.Split(" (", 2);
+                string name = parts[0];
+                if (parts.Length == 2 && !name.Equals("id", StringComparison.OrdinalIgnoreCase) &&
+                    !name.EndsWith("_id", StringComparison.OrdinalIgnoreCase) &&
+                    Regex.IsMatch(parts[1], SchemaTags.NumericSqlType, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
+                    return name;
+            }
+            return null;
+        }
+
         private string? GetRangeUnavailableReason(AssetBundle? bundle, StageRange range)
         {
             if (bundle == null || !bundle.IsDual) return "이중 모델 에셋 폴더를 선택하세요.";
@@ -69,7 +204,7 @@ namespace SqlApp.ViewModels
                 if (reason != null) return reason;
             }
             if ((range.Contains(PipelineStage.Mapper) || range.Contains(PipelineStage.Postprocessor)) && !File.Exists(bundle.DbPath))
-                return "이 구간에 필요한 shop.db가 에셋 폴더에 없습니다.";
+                return "이 구간에 필요한 .db 파일이 에셋 폴더에 없습니다.";
             return null;
         }
 
@@ -97,7 +232,7 @@ namespace SqlApp.ViewModels
             var session = SelectedSession;
             if (session == null || dual == session.IsDualMode) return;
             session.IsDualMode = dual;
-            var bundle = _allBundles.FirstOrDefault(b => b.IsDual == dual);
+            var bundle = AssetDiscoveryService.GetDefaultBundle(_allBundles, dual);
             session.Bundle = bundle;
             session.BundleDirectory = bundle?.DirectoryPath ?? "";
             session.SelectedRange = DefaultRange(bundle);
@@ -124,11 +259,11 @@ namespace SqlApp.ViewModels
 
         public void SelectAssetFolder(string folderPath)
         {
-            var bundle = AssetDiscoveryService.AddFolder(_allBundles, folderPath);
-            if (bundle == null || bundle.IsDual != IsDualMode)
+            var bundle = AssetDiscoveryService.AddFolder(_allBundles, folderPath, IsDualMode);
+            if (bundle == null)
             {
-                StatusMessage = IsDualMode ? "front.gguf, back.gguf 또는 shop.db가 있는 이중 모델 폴더를 선택하세요."
-                    : "단일 .gguf 모델과 .db가 있는 단일 모델 폴더를 선택하세요.";
+                StatusMessage = IsDualMode ? "앞·뒷모델 .gguf 파일이 있는 폴더나, 사용할 단계의 모델 또는 DB가 있는 폴더를 선택하세요."
+                    : ".gguf 파일 하나와 .db 파일 하나가 있는 단일 모델 폴더를 선택하세요.";
                 return;
             }
             RefreshBundleChoices();
@@ -165,6 +300,8 @@ namespace SqlApp.ViewModels
         {
             OnPropertyChanged(nameof(SelectedRange));
             OnPropertyChanged(nameof(PrimaryInputHint));
+            OnPropertyChanged(nameof(WelcomeDescription));
+            OnPropertyChanged(nameof(PromptSuggestions));
         }
 
         private string ModelPaths(bool fileNames)
@@ -189,12 +326,14 @@ namespace SqlApp.ViewModels
         public partial bool IsLoadingSchema { get; set; }
 
         internal MainViewModel(List<AssetBundle> bundles, SessionStorageService sessionStorage, InferenceService inference,
-            Func<PipelineStage, string, string, int, Task<InferenceResult>>? runStage = null)
+            Func<PipelineStage, string, string, int, Task<InferenceResult>>? runStage = null,
+            Func<string, string, int, Task<InferenceResult>>? runSingle = null)
         {
             _allBundles = bundles;
             _sqlExecutionService = new SqlExecutionService();
             _inferenceService = inference;
-            _runStage = runStage ?? inference.RunStageAsync;
+            _runStageOverride = runStage;
+            _runSingleOverride = runSingle;
             _sessionStorageService = sessionStorage;
             Initialization = LoadInitialSessionsAsync();
         }
@@ -218,11 +357,12 @@ namespace SqlApp.ViewModels
         [RelayCommand]
         public void CreateNewSession()
         {
+            var bundle = AssetDiscoveryService.GetDefaultBundle(_allBundles, false);
             var session = new ConversationSession
             {
                 Title = $"새 대화 {Sessions.Count + 1}",
-                Bundle = _allBundles.FirstOrDefault(b => !b.IsDual),
-                MaxTokens = 64
+                Bundle = bundle,
+                BundleDirectory = bundle?.DirectoryPath ?? ""
             };
 
             Sessions.Insert(0, session);
@@ -281,6 +421,12 @@ namespace SqlApp.ViewModels
         private AssetBundle? GetAvailableSessionBundle()
         {
             var bundle = CurrentSessionBundle;
+            if (IsDualMode)
+            {
+                if (GetRangeUnavailableReason(bundle, SelectedRange) is not { } reason) return bundle;
+                StatusMessage = reason;
+                return null;
+            }
             if (bundle != null && File.Exists(bundle.ModelPath) && File.Exists(bundle.DbPath))
                 return bundle;
 
@@ -293,6 +439,7 @@ namespace SqlApp.ViewModels
         {
             var bundle = CurrentSessionBundle;
             CurrentSchema.Clear();
+            OnPropertyChanged(nameof(PromptSuggestions));
             if (bundle == null || !File.Exists(bundle.DbPath))
             {
                 IsLoadingSchema = false;
@@ -309,6 +456,7 @@ namespace SqlApp.ViewModels
                 {
                     CurrentSchema.Add(t);
                 }
+                OnPropertyChanged(nameof(PromptSuggestions));
             }
             finally
             {
@@ -319,40 +467,64 @@ namespace SqlApp.ViewModels
         [RelayCommand]
         public void UsePromptSuggestion(string? suggestion)
         {
-            if (IsSingleMode && !string.IsNullOrWhiteSpace(suggestion))
+            if (!HasJsonAttachment && !string.IsNullOrWhiteSpace(suggestion))
             {
                 InputText = suggestion;
             }
+        }
+
+        private async Task<IReadOnlyList<TableSchemaInfo>> GetPipelineSchemaAsync(AssetBundle bundle, StageRange range)
+        {
+            if (bundle.IsDual && (range.Contains(PipelineStage.Mapper) || range.Contains(PipelineStage.Postprocessor)))
+                return await _sqlExecutionService.GetDatabaseSchemaAsync(bundle.DbPath);
+            return [];
+        }
+
+        private Task<PipelineRun> RunPipelineAsync(InferenceService inference, AssetBundle bundle, StageRange range,
+            string input, IReadOnlyList<TableSchemaInfo> schema, int maxTokens, string sessionId, Guid messageId)
+        {
+            var runStage = _runStageOverride ?? inference.RunStageAsync;
+            return PipelineRunner.RunAsync(range, input, "", bundle.DirectoryPath, bundle.DbPath, schema,
+                (stage, prompt) => runStage(stage,
+                    stage == PipelineStage.Front ? bundle.FrontModelPath : bundle.BackModelPath, prompt, maxTokens),
+                sessionId, messageId);
+        }
+
+        private Task<InferenceResult> RunSingleAsync(InferenceService inference, AssetBundle bundle, string input, int maxTokens)
+        {
+            var runSingle = _runSingleOverride ?? inference.RunQueryAsync;
+            return runSingle(bundle.ModelPath, input, maxTokens);
+        }
+
+        private static void SetDefaultTitle(ConversationSession session, string title)
+        {
+            if (session.Messages.Count == 0 || session.Title.StartsWith("새 대화", StringComparison.Ordinal))
+                session.Title = title.Length > 20 ? title[..20] + "..." : title;
         }
 
         [RelayCommand]
         public async Task SendMessageAsync()
         {
             var session = SelectedSession;
-            if (session == null || string.IsNullOrWhiteSpace(InputText) || IsGenerating)
+            if (session == null || IsGenerating) return;
+            string? filePath = session.PendingJsonFilePath;
+            if (filePath == null && string.IsNullOrWhiteSpace(InputText)) return;
+
+            var bundle = GetAvailableSessionBundle();
+            if (bundle == null) return;
+            if (filePath != null)
             {
+                await RunJsonBatchAsync(session, bundle, filePath);
                 return;
             }
 
             bool dual = IsDualMode;
             var range = SelectedRange;
-            if (dual && GetRangeUnavailableReason(CurrentSessionBundle, range) is { } reason)
-            {
-                StatusMessage = reason;
-                return;
-            }
-            var bundle = dual ? CurrentSessionBundle : GetAvailableSessionBundle();
-            if (bundle == null) return;
-
             string chatInput = InputText;
             int maxTokens = session.MaxTokens;
             ClearInputs();
 
-            // Auto-rename session title on first message
-            if (session.Messages.Count == 0 || session.Title.StartsWith("새 대화", StringComparison.Ordinal))
-            {
-                session.Title = chatInput.Length > 20 ? chatInput[..20] + "..." : chatInput;
-            }
+            SetDefaultTitle(session, chatInput);
 
             // User Message
             var userMsg = new ChatMessage
@@ -378,14 +550,8 @@ namespace SqlApp.ViewModels
             {
                 if (dual)
                 {
-                    IReadOnlyList<TableSchemaInfo> schema = Array.Empty<TableSchemaInfo>();
-                    if (range.Contains(PipelineStage.Mapper) || range.Contains(PipelineStage.Postprocessor))
-                        schema = await _sqlExecutionService.GetDatabaseSchemaAsync(bundle.DbPath);
-
-                    var run = await PipelineRunner.RunAsync(range, chatInput, "", bundle.DirectoryPath, bundle.DbPath, schema,
-                        (stage, input) => _runStage(stage,
-                            stage == PipelineStage.Front ? bundle.FrontModelPath : bundle.BackModelPath, input, maxTokens),
-                        session.Id, assistantMsg.Id);
+                    var schema = await GetPipelineSchemaAsync(bundle, range);
+                    var run = await RunPipelineAsync(_inferenceService, bundle, range, chatInput, schema, maxTokens, session.Id, assistantMsg.Id);
                     assistantMsg.PipelineRun = run;
                     assistantMsg.ComputeTimeMs = run.ComputeTimeMs;
                     assistantMsg.Sql = run.FinalSql;
@@ -394,7 +560,7 @@ namespace SqlApp.ViewModels
                 }
                 else
                 {
-                    var result = await _inferenceService.RunQueryAsync(bundle.ModelPath, chatInput, maxTokens);
+                    var result = await RunSingleAsync(_inferenceService, bundle, chatInput, maxTokens);
                     assistantMsg.ComputeTimeMs = result.ComputeTimeMs;
                     assistantMsg.Sql = result.Text;
                     assistantMsg.StopReason = result.StopReason;
@@ -503,41 +669,84 @@ namespace SqlApp.ViewModels
             session.Messages.Insert(index, resultMessage);
         }
 
-        [RelayCommand]
-        public async Task ImportJsonFileAsync(string filePath)
+        private async Task RunJsonBatchAsync(ConversationSession session, AssetBundle bundle, string filePath)
         {
-            var session = SelectedSession;
-            if (session == null || session.IsDualMode || string.IsNullOrWhiteSpace(filePath) || !File.Exists(filePath))
-            {
-                return;
-            }
-
+            var range = session.SelectedRange;
+            int maxTokens = session.MaxTokens;
+            int workerCount = session.JsonBatchWorkerCount;
+            string fileName = Path.GetFileName(filePath);
+            var summary = new ChatMessage { Sender = MessageSender.Assistant };
+            using var cancellation = new CancellationTokenSource();
+            var additionalWorkers = new List<InferenceService>();
+            _batchCancellation = cancellation;
+            _batchSession = session;
+            IsGenerating = true;
+            BatchState = JsonBatchState.Preparing;
+            SetJsonAttachment(session, null);
+            SetDefaultTitle(session, fileName);
+            session.Messages.Add(new ChatMessage { Sender = MessageSender.User, Text = $"JSON 첨부 · {fileName}" });
+            StatusMessage = $"{fileName} 처리 중…";
             try
             {
-                string json = await File.ReadAllTextAsync(filePath);
-                using var doc = JsonDocument.Parse(json);
-                if (session != SelectedSession || session.IsDualMode) return;
-
-                var root = doc.RootElement;
-                IEnumerable<JsonElement> rows = root.ValueKind == JsonValueKind.Array ? root.EnumerateArray() : new[] { root };
-                string[] keys = ["question", "sql"];
-                foreach (var row in rows.Where(e => e.ValueKind == JsonValueKind.Object))
-                {
-                    foreach (var key in keys)
+                var schema = await GetPipelineSchemaAsync(bundle, range);
+                // Each service serializes its own model handle. Keep the first worker's warmed models for reuse.
+                for (int i = 1; i < workerCount; i++)
+                    additionalWorkers.Add(new InferenceService());
+                var workers = new List<Func<string, Task<IReadOnlyList<string>>>>(workerCount);
+                string sessionId = session.Id;
+                foreach (var worker in additionalWorkers.Prepend(_inferenceService))
+                    workers.Add(input => InferBatchRowAsync(worker, bundle, range, input, schema, maxTokens, sessionId));
+                var result = await JsonBatchService.ProcessAsync(filePath, workers, cancellation.Token,
+                    (done, total) =>
                     {
-                        if (!row.TryGetProperty(key, out var field) || field.ValueKind != JsonValueKind.String ||
-                            string.IsNullOrWhiteSpace(field.GetString())) continue;
-                        InputText = field.GetString()!;
-                        StatusMessage = "JSON 파일에서 첫 번째 입력을 불러왔습니다.";
-                        return;
-                    }
-                }
-                StatusMessage = $"JSON 파일에 {string.Join(", ", keys)} 입력이 없습니다.";
+                        if (done == total) BatchState = JsonBatchState.Saving;
+                        else if (BatchState == JsonBatchState.Preparing) BatchState = JsonBatchState.Running;
+                        if (SelectedSession == session && !IsStoppingJsonBatch)
+                            StatusMessage = $"{fileName} · {done}/{total}개 처리";
+                    });
+                string prefix = result.IsCancelled
+                    ? $"전체 {result.Total}개 중 {result.Processed}개 처리 후 중단했습니다. "
+                    : $"전체 {result.Total}개 중 ";
+                string counts = result.IsEvaluation
+                    ? $"{result.Matched}개가 일치했습니다."
+                    : $"{result.Succeeded}개의 추론 결과를 저장했습니다.";
+                if (result.Succeeded < result.Processed)
+                    counts += $" 추론 실패 {result.Processed - result.Succeeded}개.";
+                summary.Text = result.Processed == 0
+                    ? prefix.TrimEnd()
+                    : $"{prefix}{counts}\n{result.Path}";
             }
-            catch (Exception ex)
+            catch (Exception ex) when (ex is not OutOfMemoryException)
             {
-                StatusMessage = $"JSON 읽기 오류: {ex.Message}";
+                summary.ErrorMessage = $"JSON 처리 실패 · {ex.Message}";
             }
+            finally
+            {
+                foreach (var worker in additionalWorkers) worker.Dispose();
+                _batchCancellation = null;
+                _batchSession = null;
+                BatchState = JsonBatchState.Idle;
+                session.Messages.Add(summary);
+                if (SelectedSession == session) StatusMessage = summary.ErrorMessage ?? string.Empty;
+                IsGenerating = false;
+                await _sessionStorageService.SaveSessionsAsync(Sessions);
+            }
+        }
+
+        private async Task<IReadOnlyList<string>> InferBatchRowAsync(InferenceService inference, AssetBundle bundle,
+            StageRange range, string input, IReadOnlyList<TableSchemaInfo> schema, int maxTokens, string sessionId)
+        {
+            if (!bundle.IsDual)
+            {
+                var single = await RunSingleAsync(inference, bundle, input, maxTokens).ConfigureAwait(false);
+                return [single.Text];
+            }
+
+            var run = await RunPipelineAsync(inference, bundle, range, input, schema, maxTokens, sessionId, Guid.NewGuid())
+                .ConfigureAwait(false);
+            if (run.Error.Length > 0) throw new InvalidOperationException(run.Error);
+            if (range.End != PipelineStage.Postprocessor) return [run.Steps[^1].Output];
+            return run.FinalSqlCandidates.Where(c => c.Error.Length == 0).Select(c => c.Sql).ToArray();
         }
     }
 }

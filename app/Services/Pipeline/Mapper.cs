@@ -4,7 +4,7 @@ using SqlApp.Models;
 
 namespace SqlApp.Services.Pipeline;
 
-public static class Mapper
+public static partial class Mapper
 {
     private static readonly Regex MalformedTag = new(@"[\[\]{}]|<[A-Za-z_]", RegexOptions.CultureInvariant);
 

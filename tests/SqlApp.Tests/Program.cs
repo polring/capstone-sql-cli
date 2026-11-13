@@ -1,14 +1,89 @@
 using System.Runtime.InteropServices;
 using System.Text.Json;
-using System.Text.Json.Nodes;
 using Microsoft.Data.Sqlite;
+using SqlApp.Interop.SqlEngine;
 using SqlApp.Models;
 using SqlApp.Services;
 using SqlApp.Services.Pipeline;
+using SqlApp.ViewModels;
 
 static void Require(bool ok, string message)
 {
     if (!ok) throw new InvalidOperationException(message);
+}
+
+static async Task VerifyAutomaticBundlesAsync(string tempRoot, string frontModel)
+{
+    string assetsRoot = Path.Combine(tempRoot, "assets");
+    string Folder(string name, params string[] files)
+    {
+        string folder = Directory.CreateDirectory(Path.Combine(assetsRoot, name)).FullName;
+        foreach (string file in files) File.WriteAllBytes(Path.Combine(folder, file), []);
+        return folder;
+    }
+
+    Folder("stage900", "shop.db", "model.gguf");
+    string single = Folder("z-single", "Catalog.DB", "front.GGUF", "Catalog.DB-wal");
+    Folder("stage800", "shop.db", "back.gguf", "front.gguf");
+    Folder("generic-pair", "schema.db", "a.gguf", "b.gguf");
+    string dual = Folder("z-dual", "other.Db", "first.GgUf", "second.gguf");
+    File.Copy(frontModel, Path.Combine(dual, "second.gguf"), overwrite: true);
+    Folder("no-db", "front.gguf", "back.gguf");
+    Folder("no-model", "shop.db");
+    Folder("extra-db", "shop.db", "other.db", "model.gguf");
+    Folder("extra-model", "shop.db", "front.gguf", "back.gguf", "third.gguf");
+
+    var bundles = AssetDiscoveryService.DiscoverBundles(assetsRoot);
+    Require(bundles.Count == 5 && bundles.Count(b => b.IsDual) == 3,
+        "Auto-discovery requires exactly one DB and one or two GGUF files");
+    var one = bundles.Single(b => b.DirectoryPath == single);
+    Require(!one.IsDual && one.ModelPath == Path.Combine(single, "front.GGUF") &&
+        one.DbPath == Path.Combine(single, "Catalog.DB"), "A lone model is single regardless of its name");
+    var two = bundles.Single(b => b.DirectoryPath == dual);
+    Require(two.IsDual && two.DbPath == Path.Combine(dual, "other.Db") &&
+        two.FrontModelPath == Path.Combine(dual, "second.gguf") && two.BackModelPath == Path.Combine(dual, "first.GgUf"),
+        "A front GGUF with a custom name keeps its role even when it sorts last");
+    var named = bundles.Single(b => b.Name == "stage800");
+    Require(Path.GetFileName(named.FrontModelPath) == "front.gguf" && Path.GetFileName(named.BackModelPath) == "back.gguf",
+        "Explicit front and back filenames preserve their roles");
+    var generic = bundles.Single(b => b.Name == "generic-pair");
+    Require(new HashSet<string> { Path.GetFileName(generic.FrontModelPath), Path.GetFileName(generic.BackModelPath) }
+        .SetEquals(["a.gguf", "b.gguf"]), "Two generic names still qualify and use both model files");
+    var ascending = bundles.OrderBy(b => b.Name, StringComparer.Ordinal);
+    Require(AssetDiscoveryService.GetDefaultBundle(ascending, false) == one &&
+        AssetDiscoveryService.GetDefaultBundle(ascending, true) == two, "Folder name takes precedence over stage numbers");
+
+    using var inference = new InferenceService();
+    var history = new SessionStorageService(Path.Combine(tempRoot, "auto-history"));
+    var vm = new MainViewModel(ascending.ToList(), history, inference);
+    await vm.Initialization;
+    Require(vm.CurrentSessionBundle == one, "A new chat selects the alphabetically last single bundle");
+    vm.SetDualMode(true);
+    Require(vm.CurrentSessionBundle == two, "Switching to dual mode selects the alphabetically last dual bundle");
+    vm.SelectBundle(named);
+    await history.SaveSessionsAsync(vm.Sessions);
+    Require((await history.LoadSessionsAsync(bundles)).Single().Bundle == named,
+        "Reopening a chat restores its chosen folder even when another is the default");
+}
+
+static void VerifyFrontTokenizer(string model)
+{
+    // Reference IDs from mapper feat/#4-natural-questions (dc640bf), using this bundled model.
+    var tokenizer = GgufContract.ReadTokenizer(model, ModelRole.Front);
+    Require(tokenizer.EncodePrompt("date #1").AsSpan().SequenceEqual([257, 398, 32, 35, 49, 259]),
+        "Front questions apply word BPE to date and preserve #1 as two bytes");
+    Require(tokenizer.Encode("café\0😀").AsSpan().SequenceEqual([99, 486, 195, 169, 0, 240, 159, 152, 128]),
+        "Front questions preserve UTF-8 bytes and NUL");
+    Require(tokenizer.Encode("<customers>").AsSpan().SequenceEqual([60, 489, 62]) &&
+        tokenizer.Decode([60, 267, 62]).AsSpan().SequenceEqual("<customers>"u8),
+        "Schema names use word BPE in questions and dedicated IDs inside output tags");
+
+    const string outputChars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789.,?'-<>{}[]*";
+    var expected = outputChars.Select(c => (int)c).ToHashSet();
+    expected.UnionWith(Enumerable.Range(260, 623)); // Model's 7 fixed atoms, 16 names and 600 merges
+    Require(tokenizer.EosId == 258 && Enumerable.Range(0, tokenizer.VocabSize)
+        .All(id => (tokenizer.DecodableMask[id] != 0) == expected.Contains(id)),
+        "Every front output ID matches mapper; native generation handles EOS separately");
 }
 
 var root = new DirectoryInfo(AppContext.BaseDirectory);
@@ -17,18 +92,13 @@ while (!File.Exists(Path.Combine(root.FullName, "SqlApp.sln")))
 var temp = Directory.CreateDirectory(Path.Combine(root.FullName, "build", "tests", Guid.NewGuid().ToString("N")));
 try
 {
-    using var document = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(AppContext.BaseDirectory, "category.json")));
-    using var golden = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(AppContext.BaseDirectory, "category.expected.json")));
-    var example = document.RootElement;
-    var expected = golden.RootElement;
-    string question = example.GetProperty("input").GetString()!, taggedQuestion = example.GetProperty("output").GetString()!;
-    string generalized = expected.GetProperty("generalizedQuestion").GetString()!, taggedSql = expected.GetProperty("taggedSql").GetString()!;
+    string frontModel = Path.Combine(root.FullName, "assets", "dual-model-test", "front.gguf");
+    await VerifyAutomaticBundlesAsync(temp.FullName, frontModel);
     string single = Directory.CreateDirectory(Path.Combine(temp.FullName, "single")).FullName;
     string dual = Directory.CreateDirectory(Path.Combine(temp.FullName, "dual")).FullName;
     string db = Path.Combine(dual, "shop.db");
-    var fixtureModel = Path.Combine(root.FullName, "fixtures", "v2", "base", "model.gguf");
     var singleModel = Path.Combine(single, "custom.gguf");
-    File.Copy(fixtureModel, singleModel);
+    TestModel.Write(singleModel, "SELECT 1");
     using (File.Create(Path.Combine(single, "custom.db"))) { }
     using (var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = db, Pooling = false }.ToString()))
     {
@@ -43,141 +113,25 @@ try
     var schemaOnly = AssetDiscoveryService.AddFolder(assets, dual);
     Require(schemaOnly is { IsDual: true } && schemaOnly.DbPath == db && schemaOnly.BackModelPath == "", "Mapper-only schema folder");
     string back = Path.Combine(dual, "back.gguf");
-    File.Copy(fixtureModel, back);
+    File.Copy(singleModel, back);
     var bundle = AssetDiscoveryService.AddFolder(assets, dual)!;
     Require(bundle.IsDual && bundle.FrontModelPath == "" && bundle.BackModelPath == back, "Back role discovery");
     string front = Path.Combine(dual, "front.gguf");
-    File.Copy(fixtureModel, front);
+    File.Copy(frontModel, front);
+    VerifyFrontTokenizer(front);
     bundle = AssetDiscoveryService.AddFolder(assets, dual)!;
     Require(bundle.FrontModelPath == front && assets.Count == 2, "Refresh a dual bundle");
 
     var sqlite = new SqlExecutionService();
     await SqlQueryChecks.VerifyPreparationAsync(sqlite, db);
     var schema = await sqlite.GetDatabaseSchemaAsync(db);
-    var calls = new List<PipelineStage>();
-    Task<InferenceResult> Predict(PipelineStage stage, string input)
-    {
-        calls.Add(stage);
-        if (stage == PipelineStage.Front && input == question) return Task.FromResult(new InferenceResult(taggedQuestion, "eos", 1.25));
-        if (stage == PipelineStage.Back && input == generalized) return Task.FromResult(new InferenceResult(taggedSql, "eos", 3.5));
-        throw new InvalidOperationException($"Unexpected input at {stage}: {input}");
-    }
-    var session = new ConversationSession { Bundle = bundle, BundleDirectory = dual, IsDualMode = true };
-    Task<PipelineRun> Run(PipelineStage start, PipelineStage end, string input, string extra = "")
-        => session.RunInSessionAsync(new(start, end), input, extra, dual, db, schema, Predict);
-    var full = await Run(PipelineStage.Front, PipelineStage.Postprocessor, question);
-    Guid fullId = session.Messages.Last().Id;
-    Require(full.Error == "" && full.Mapping != null && full.FinalSql == expected.GetProperty("finalSql").GetString(), $"Full run: {full.Error} {full.FinalSql}");
-    Require(full.Steps.Select(s => s.ComputeTimeMs).SequenceEqual(new double?[] { 1.25, null, 3.5, null }),
-        "Keep native compute time only on model stages");
-    Require(full.FrontOutput == taggedQuestion && full.GeneralizedQuestion == generalized &&
-        full.Mapping!.Values["[TABLE1.COL2, string, #1]"] == "kitchen", "Restore values from the original question and tagged sentence");
-    var rows = await sqlite.ExecuteQueryAsync(db, full.FinalSql);
-    Require(rows.ErrorMessage == null && rows.Rows.Single().Single() == "cup", "Read-only SQLite result");
-    var mapping = full.SerializeMappings();
-    using var singleMapping = JsonDocument.Parse(mapping);
-    CandidatePipelineChecks.VerifyEnvelope(singleMapping.RootElement, session.Id, fullId);
-    Require(singleMapping.RootElement.GetProperty("Candidates").GetArrayLength() == 1, "Always export a candidate array for one mapping");
-    // Exercise restoration directly with the special characters kept in original values.
-    var literalMap = Mapper.MapCandidates(question.Replace("kitchen", "chef's_20%", StringComparison.Ordinal),
-        taggedQuestion, schema).Candidates.Single();
-    string like = taggedSql.Replace("= '[", "LIKE '%[", StringComparison.Ordinal).Replace("]'", "]%'", StringComparison.Ordinal);
-    string restoredLike = Postprocessor.Restore(like, literalMap, schema);
-    Require(restoredLike.EndsWith("LIKE '%chef''s!_20!%%' ESCAPE '!'"), "Escape original quote and LIKE wildcards");
-
     var priceSchema = new[] { new TableSchemaInfo { TableName = "items", Columns = ["item_name (TEXT)", "price (REAL)"] } };
     var priceMap = Mapper.MapCandidates("products priced between 20 dollars and 10 dollars",
         "{items.item_name, string} priced between [items.price, numeric, #1] and [items.price, numeric, #2]",
         priceSchema).Candidates.Single();
     string interval = Postprocessor.Restore("SELECT {TABLE1.COL1, string} FROM <TABLE1> WHERE <TABLE1.COL2, numeric> BETWEEN [TABLE1.COL2, numeric, #1] AND [TABLE1.COL2, numeric, #2]", priceMap, priceSchema);
     Require(interval.EndsWith("BETWEEN 10 AND 20"), "Restore numeric units and sort BETWEEN bounds");
-    foreach (var start in Enum.GetValues<PipelineStage>())
-    foreach (var end in Enum.GetValues<PipelineStage>().Where(s => s >= start))
-    {
-        calls.Clear();
-        string input = start switch
-        {
-            PipelineStage.Mapper => taggedQuestion,
-            PipelineStage.Back => generalized,
-            PipelineStage.Postprocessor => taggedSql,
-            _ => question
-        };
-        string extra = start == PipelineStage.Mapper ? question
-            : start >= PipelineStage.Back && end == PipelineStage.Postprocessor ? mapping : "";
-        var run = await Run(start, end, input, extra);
-        var stages = Enum.GetValues<PipelineStage>().Where(s => s >= start && s <= end).ToList();
-        Require(run.Error == "" && run.Steps.Select(s => s.Stage).SequenceEqual(stages), $"{start}–{end}: {run.Error}");
-        Require(run.Input == input && run.Steps[0].Input == input, "The first stage receives the exact chat input");
-        Require(calls.SequenceEqual(stages.Where(s => s is PipelineStage.Front or PipelineStage.Back)), "Unselected model called");
-        Require(run.FinalSql == (end == PipelineStage.Postprocessor ? full.FinalSql : ""), "Executable output boundary");
-        if (start <= PipelineStage.Mapper && end >= PipelineStage.Mapper)
-            Require(run.GeneralizedQuestion == generalized, "Mapper output");
-    }
-    var tagged = await Run(PipelineStage.Mapper, PipelineStage.Mapper, taggedQuestion, question);
-    Guid taggedId = session.Messages.Last().Id;
-    Require(tagged.Error == "" && tagged.GeneralizedQuestion == generalized, $"Tagged front input: {tagged.Error}");
-    var missingQuestion = await Run(PipelineStage.Mapper, PipelineStage.Mapper, taggedQuestion);
-    Require(missingQuestion.Error.Contains("원문 질문") && missingQuestion.Steps.Count == 0,
-        "A mapper start needs the original question to recover the source values");
-    var reversedInputs = await Run(PipelineStage.Mapper, PipelineStage.Mapper, question, taggedQuestion);
-    Require(reversedInputs.Error.Length > 0 && reversedInputs.Steps.Single().Input == question,
-        "The chat field supplies the tagged sentence, even if the auxiliary field contains tags");
-    const string valueTag = "[items.category, string, #1]";
-    var repeated = await Run(PipelineStage.Mapper, PipelineStage.Mapper, $"compare {valueTag} with {valueTag}",
-        "compare Hot Pink with Hot Pink");
-    Guid repeatedId = session.Messages.Last().Id;
-    Require(repeated.Error == "" && repeated.Mapping!.Values.Single().Value == "Hot Pink",
-        "Preserve a repeated multiword value with its original case");
-    await CandidatePipelineChecks.RunAsync(dual, db, schema, question, taggedQuestion, generalized, taggedSql);
-    var identifiers = await Run(PipelineStage.Mapper, PipelineStage.Mapper, "show {items.item_name, string} <items.category, string>",
-        "show the item names category");
-    Require(identifiers.GeneralizedQuestion == "show {TABLE1.COL1, string} <TABLE1.COL2, string>" &&
-            identifiers.MappingCandidates.Count == 1 && identifiers.MappingCandidates[0].Values.Count == 0,
-            "Ambiguous identifier spans with identical value bindings produce one mapping");
-    var mismatch = await Run(PipelineStage.Mapper, PipelineStage.Mapper, taggedQuestion.Replace("things", "products"), question);
-    Require(mismatch.Error != "", "Reject edited untagged text");
-    var malformed = await Run(PipelineStage.Mapper, PipelineStage.Mapper, taggedQuestion.Replace("#1]", "#1"), question);
-    Require(malformed.Error != "", "Reject malformed tag syntax");
-    const string spanObject = """{"select":[{"mark":"{items.item_name, string}","start":13,"end":18}]}""";
-    var indexed = await Run(PipelineStage.Mapper, PipelineStage.Mapper, spanObject, question);
-    Require(indexed.Error != "", "Reject obsolete index labels passed to the mapper");
-    var wrapped = await Run(PipelineStage.Mapper, PipelineStage.Mapper, example.GetRawText(), question);
-    Require(wrapped.Error != "", "The mapper expects the tagged text itself");
-    var badFront = await session.RunInSessionAsync(new(PipelineStage.Front, PipelineStage.Front), question, "", dual, db, [],
-        (_, _) => Task.FromResult(new InferenceResult(spanObject, "eos", 0.25)));
-    Require(badFront.Error != "" && badFront.Steps.Single().Output == spanObject, "Reject a model emitting index labels on a front-only run");
-    calls.Clear();
-    var missing = await Run(PipelineStage.Back, PipelineStage.Postprocessor, generalized);
-    Require(missing.Error != "" && calls.Count == 0, "Preflight must detect missing mapping before inference");
-    var backOnly = await Run(PipelineStage.Back, PipelineStage.Back, generalized);
-    Require(backOnly.Error == "" && backOnly.Mappings == null && backOnly.TaggedSql == taggedSql,
-        "A back-only run takes a generalized question and returns tagged SQL");
-    var postOnly = await Run(PipelineStage.Postprocessor, PipelineStage.Postprocessor, taggedSql, mapping);
-    Require(postOnly.Error == "" && postOnly.FinalSql == full.FinalSql && postOnly.Mappings?.MessageId == fullId,
-        "A postprocessor start takes tagged SQL and the mapping supplied for the original question");
-    calls.Clear();
-    var reverse = await Run(PipelineStage.Back, PipelineStage.Front, generalized);
-    Require(reverse.Error != "" && calls.Count == 0, "Reverse range");
-    var replayRange = new StageRange(PipelineStage.Back, PipelineStage.Postprocessor);
-    async Task RejectReplay(ConversationSession context, string json, string folder, string database, string reason)
-    {
-        var result = await context.RunInSessionAsync(replayRange, generalized, json, folder, database, schema, Predict);
-        Require(result.Error.Length > 0 && calls.Count == 0, reason);
-    }
-    await RejectReplay(new ConversationSession(), mapping, dual, db, "A different conversation cannot reuse the same folder's mapping");
-    await RejectReplay(session, mapping, single, db, "A changed bundle cannot reuse a mapping from the original bundle");
-    await RejectReplay(session, mapping, dual, Path.Combine(dual, "other.db"), "A changed database cannot reuse the original mapping");
-    var wrongMessage = JsonNode.Parse(mapping)!;
-    wrongMessage["MessageId"] = Guid.NewGuid();
-    await RejectReplay(session, wrongMessage.ToJsonString(), dual, db, "Reject a mapping whose source message is missing");
-    wrongMessage["MessageId"] = repeatedId;
-    await RejectReplay(session, wrongMessage.ToJsonString(), dual, db, "Reject candidates attached to another query's message");
-    wrongMessage["MessageId"] = session.Messages.Single(m => m.PipelineRun == backOnly).Id;
-    await RejectReplay(session, wrongMessage.ToJsonString(), dual, db, "A back-only reply is not the mapper's originating reply");
-    var incomplete = await session.RunInSessionAsync(new(PipelineStage.Front, PipelineStage.Back), question, "", dual, db, schema,
-        (_, _) => Task.FromResult(new InferenceResult(taggedQuestion, "max_new_tokens", 0.75)));
-    Require(incomplete.Error != "" && incomplete.Steps.Count == 1 && incomplete.TaggedSql == "", "Stop at incomplete generation");
-    Require(incomplete.Steps.Single().ComputeTimeMs == 0.75, "Keep compute time for truncated generation");
+    await CandidatePipelineChecks.RunAsync(dual, db, schema);
 
     var history = Directory.CreateDirectory(Path.Combine(temp.FullName, "history")).FullName;
     var store = new SessionStorageService(history);
@@ -188,65 +142,23 @@ try
     var previous = (await store.LoadSessionsAsync(assets)).Single();
     Require(!previous.IsDualMode && previous.Messages[0].CanExecuteSql && previous.Bundle?.ModelPath == singleModel,
         "Legacy session restores as single mode with its original DB");
+    Require(previous.JsonBatchWorkerCount == Math.Min(4, Environment.ProcessorCount),
+        "A session saved before the worker setting existed keeps its previous parallelism");
     Require(previous.Messages[1] is { HasSqlValidationError: true, CanExecuteSql: false },
         "Legacy invalid SQL remains visible but cannot run");
     Require(previous.Messages[0] is { InferenceTimeMs: 3, ComputeTimeMs: null },
         "Existing end-to-end timings stay separate from native compute timings");
-    var newSession = new ConversationSession { Id = session.Id, Bundle = bundle, BundleDirectory = dual, IsDualMode = true, SelectedRange = tagged.Range };
-    newSession.Messages.Add(new ChatMessage { Id = taggedId, Sender = MessageSender.Assistant, PipelineRun = tagged, DbPath = db });
-    newSession.Messages.Add(new ChatMessage { Id = fullId, Sender = MessageSender.Assistant, PipelineRun = full, Sql = full.FinalSql, DbPath = db, ComputeTimeMs = 4.75 });
-    await store.SaveSessionsAsync([previous, newSession]);
-    var savedPath = Path.Combine(history, "sessions.json");
-    var legacySelection = JsonNode.Parse(await File.ReadAllTextAsync(savedPath))!.AsArray();
-    legacySelection[1]!["SelectedRange"] = JsonSerializer.SerializeToNode(tagged.Range);
-    await File.WriteAllTextAsync(savedPath, legacySelection.ToJsonString());
-    var saved = (await store.LoadSessionsAsync(assets)).Single(s => s.IsDualMode);
-    Require(saved.SelectedRange == new StageRange(PipelineStage.Front, PipelineStage.Mapper) &&
-        saved.Bundle?.DirectoryPath == dual && saved.Messages.Count == 2, "Snap a legacy mapper-only selection to front through mapper");
-    Require(!saved.Messages[0].IsWaitingResponse && !saved.Messages[0].CanExecuteSql
-        && saved.Messages[0].PipelineRun?.Mappings?.MessageId == saved.Messages[0].Id && saved.Messages[0].Id == taggedId,
-        "Intermediate display and mapper response identity on reload");
-    var savedMapper = saved.Messages[0].PipelineRun!;
-    Require(savedMapper.Range == tagged.Range && savedMapper.Input == taggedQuestion && savedMapper.Steps.Single().Input == taggedQuestion &&
-        savedMapper.MapperSourceQuestion == question, "Keep the original executed range and inputs on historical mapper responses");
-    Require(saved.Messages[1].CanExecuteSql && saved.Messages[1].DbPath == db, "SQL target DB on reload");
-    Require(saved.Messages[1].ComputeTimeMs == 4.75 && saved.Messages[1].PipelineRun!.Steps
-        .Select(s => s.ComputeTimeMs).SequenceEqual(full.Steps.Select(s => s.ComputeTimeMs)), "Persist fractional compute times");
-    var afterRestart = await saved.RunInSessionAsync(new(PipelineStage.Postprocessor, PipelineStage.Postprocessor),
-        taggedSql, mapping, dual, db, schema, Predict);
-    Require(afterRestart.Error == "" && afterRestart.FinalSql == full.FinalSql &&
-        afterRestart.Mappings?.ConversationId == saved.Id && afterRestart.Mappings.MessageId == fullId,
-        "An exported record resolves to the same source message after reloading the conversation");
 
     var nativeName = OperatingSystem.IsWindows() ? "sql_engine.dll" : OperatingSystem.IsMacOS() ? "libsql_engine.dylib" : "libsql_engine.so";
     var nativePath = Path.Combine(root.FullName, "app", "runtimes", RuntimeInformation.RuntimeIdentifier, "native", nativeName);
     NativeLibrary.SetDllImportResolver(typeof(InferenceService).Assembly, (name, _, _) =>
         name == "sql_engine" ? NativeLibrary.Load(nativePath) : IntPtr.Zero);
     await SqlQueryChecks.VerifyChatAsync(temp.FullName, db);
-    await ViewModelChecks.RunAsync(temp.FullName, assets, example, expected);
-    ContractV2Checks.Verify(Path.Combine(root.FullName, "fixtures", "v2"), temp.FullName);
+    await ViewModelChecks.RunAsync(temp.FullName, assets);
+    await JsonBatchChecks.RunAsync(temp.FullName, assets);
     using var inference = new InferenceService();
     Require(inference.GetStageUnavailableReason(PipelineStage.Front, "") != null, "Missing model availability");
-    var incompatible = Path.Combine(temp.FullName, "other-version.gguf");
-    byte[] bytes = File.ReadAllBytes(fixtureModel);
-    var key = "capstone_sql.contract_version"u8;
-    int valueOffset = bytes.AsSpan().IndexOf(key) + key.Length + sizeof(uint);
-    Require(valueOffset > key.Length + sizeof(uint), "Fixture missing contract_version metadata");
-    System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(valueOffset), 99);
-    File.WriteAllBytes(incompatible, bytes);
-    Require(inference.GetStageUnavailableReason(PipelineStage.Back, incompatible)?.Contains("v99") == true, "Explain unsupported model contract");
-    // The base fixture's independent full-prefix predictions for these literal prompts differ.
-    foreach (var (input, expectedText) in new[] { ("Show <TABLE1.COL2>", "|||"), ("show <table1.col2>", "|::") })
-    {
-        var singleResult = await inference.RunQueryAsync(singleModel, input, 3);
-        var frontResult = await inference.RunStageAsync(PipelineStage.Front, front, input, 3);
-        var backResult = await inference.RunStageAsync(PipelineStage.Back, back, input, 3);
-        foreach (var result in new[] { singleResult, frontResult, backResult })
-            Require(result.Text == expectedText && result.StopReason == "max_new_tokens" && result.ComputeTimeMs > 0,
-                $"Single, front and back must preserve case for {input}: expected {expectedText}, got {result.Text}");
-    }
-    await NativePipelineSmoke.VerifyAsync(temp.FullName, db, schema, example, expected);
-    Console.WriteLine("Verified five slider selections, ten internal pipeline ranges, distinct value mappings, one back-model call for multiple SQLs, candidate validation and execution, session storage, native inference and truncation notices.");
+    Console.WriteLine("Verified asset discovery, session migration, stage selection, candidate mapping, SQL validation and execution, and JSON batch inference and evaluation.");
 }
 finally
 {

@@ -34,7 +34,7 @@ internal sealed class SqlModel : SafeHandleZeroOrMinusOneIsInvalid
         return (count, stopReason, computeTimeMs);
     }
 
-    // Full-prefix reference for checking native logits against the contract fixtures.
+    // Evaluate the full prefix and return the logits for its last position.
     internal double Forward(int[] tokenIds, int tokenCount, float[] logits)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(tokenCount);

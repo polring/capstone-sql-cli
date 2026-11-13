@@ -20,7 +20,8 @@ namespace SqlApp.Services
         public StageRange? SelectedRange { get; set; }
         public string ModelPath { get; set; } = string.Empty;
         public string DbPath { get; set; } = string.Empty;
-        public int MaxTokens { get; set; } = 64;
+        public int MaxTokens { get; set; } = ConversationSession.DefaultMaxTokens;
+        public int JsonBatchWorkerCount { get; set; } = ConversationSession.DefaultJsonBatchWorkerCount;
         public List<ChatMessageDto> Messages { get; set; } = new();
     }
 
@@ -81,6 +82,7 @@ namespace SqlApp.Services
                         ModelPath = s.Bundle?.ModelPath ?? string.Empty,
                         DbPath = s.Bundle?.DbPath ?? string.Empty,
                         MaxTokens = s.MaxTokens,
+                        JsonBatchWorkerCount = s.JsonBatchWorkerCount,
                     };
 
                     foreach (var m in s.Messages)
@@ -139,15 +141,14 @@ namespace SqlApp.Services
                 if (!Path.IsPathFullyQualified(folder)) return null;
                 try
                 {
-                    var restored = AssetDiscoveryService.AddFolder(bundles, folder);
-                    return restored?.IsDual == dto.IsDualMode ? restored : null;
+                    return AssetDiscoveryService.AddFolder(bundles, folder, dto.IsDualMode);
                 }
                 catch (IOException) { }
                 catch (UnauthorizedAccessException) { }
                 return null;
             }
             return defaults.FirstOrDefault(b => b.IsDual == dto.IsDualMode && b.Name.Equals(dto.AssetBundleName, comparison))
-                ?? defaults.FirstOrDefault(b => b.IsDual == dto.IsDualMode);
+                ?? AssetDiscoveryService.GetDefaultBundle(defaults, dto.IsDualMode);
         }
 
         public async Task<List<ConversationSession>> LoadSessionsAsync(IList<AssetBundle> bundles)
@@ -176,6 +177,7 @@ namespace SqlApp.Services
                         IsDualMode = dto.IsDualMode,
                         SelectedRange = dto.SelectedRange ?? new StageRange(PipelineStage.Front, PipelineStage.Postprocessor),
                         MaxTokens = dto.MaxTokens,
+                        JsonBatchWorkerCount = dto.JsonBatchWorkerCount,
                     };
 
                     foreach (var m in dto.Messages)

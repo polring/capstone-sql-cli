@@ -5,7 +5,7 @@ namespace SqlApp.Services;
 internal static class TokenGeneration
 {
     internal static (byte[] Bytes, string StopReason, double ComputeTimeMs) Generate(
-        SqlModel model, SqlTokenizer tokenizer, string input, int limit)
+        SqlModel model, BpeCodec tokenizer, string input, int limit)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(limit);
         int[] prompt = tokenizer.EncodePrompt(input);

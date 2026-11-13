@@ -12,6 +12,8 @@ namespace SqlApp;
 public sealed partial class MainPage : Page
 {
     public MainViewModel ViewModel { get; } = new();
+    private IReadOnlyList<int> JsonBatchWorkerOptions { get; } =
+        Enumerable.Range(1, ConversationSession.MaxJsonBatchWorkerCount).ToArray();
 
     public MainPage()
     {
@@ -55,6 +57,20 @@ public sealed partial class MainPage : Page
 
     private void SingleMode_Click(object sender, RoutedEventArgs e) => ViewModel.SetDualMode(false);
     private void DualMode_Click(object sender, RoutedEventArgs e) => ViewModel.SetDualMode(true);
+
+    private void JsonBatchWorkerCount_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (sender is ComboBox { SelectedItem: int count })
+            ViewModel.JsonBatchWorkerCount = count;
+    }
+
+    private void PromptSuggestion_Click(object sender, RoutedEventArgs e)
+    {
+        if (ViewModel.HasJsonAttachment || sender is not Button { DataContext: string suggestion }) return;
+        ViewModel.UsePromptSuggestionCommand.Execute(suggestion);
+        PromptTextBox.Focus(FocusState.Programmatic);
+        PromptTextBox.Select(PromptTextBox.Text.Length, 0);
+    }
 
     private void HookSessionMessages()
     {
@@ -118,28 +134,8 @@ public sealed partial class MainPage : Page
             if (!isShift)
             {
                 e.Handled = true;
-                string text = PromptTextBox.Text;
-                if (!string.IsNullOrWhiteSpace(text) && !ViewModel.IsGenerating)
-                {
-                    ViewModel.InputText = text;
-                    if (ViewModel.SendMessageCommand.CanExecute(null))
-                    {
-                        ViewModel.SendMessageCommand.Execute(null);
-                    }
-                }
-            }
-        }
-    }
-
-    private void SendButton_Click(object sender, RoutedEventArgs e)
-    {
-        string text = PromptTextBox.Text;
-        if (!string.IsNullOrWhiteSpace(text) && !ViewModel.IsGenerating)
-        {
-            ViewModel.InputText = text;
-            if (ViewModel.SendMessageCommand.CanExecute(null))
-            {
-                ViewModel.SendMessageCommand.Execute(null);
+                if (!ViewModel.HasJsonAttachment && ViewModel.CanStartInference && ViewModel.SendMessageCommand.CanExecute(null))
+                    ViewModel.SendMessageCommand.Execute(null);
             }
         }
     }
@@ -150,10 +146,10 @@ public sealed partial class MainPage : Page
         {
             if (string.IsNullOrWhiteSpace(tb.Text) || !int.TryParse(tb.Text.Trim(), out int val) || val <= 0)
             {
-                tb.Text = "64";
+                tb.Text = ConversationSession.DefaultMaxTokens.ToString();
                 if (ViewModel.SelectedSession != null)
                 {
-                    ViewModel.SelectedSession.MaxTokens = 64;
+                    ViewModel.SelectedSession.MaxTokens = ConversationSession.DefaultMaxTokens;
                 }
             }
         }
@@ -192,11 +188,17 @@ public sealed partial class MainPage : Page
 
     private async void AttachButton_Click(object sender, RoutedEventArgs e)
     {
+        var session = ViewModel.SelectedSession;
+        if (session == null || !ViewModel.CanStartInference) return;
         string? path = await PickFileAsync(".json");
-        if (!string.IsNullOrEmpty(path))
-        {
-            await ViewModel.ImportJsonFileAsync(path);
-        }
+        if (!string.IsNullOrEmpty(path) && ViewModel.SelectedSession == session)
+            ViewModel.AttachJsonFile(path);
+    }
+
+    private void RemoveAttachment_Click(object sender, RoutedEventArgs e)
+    {
+        ViewModel.ClearJsonAttachment();
+        PromptTextBox.Focus(FocusState.Programmatic);
     }
 
     private void RunSqlButton_Click(object sender, RoutedEventArgs e)

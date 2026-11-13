@@ -10,8 +10,6 @@
 #include <time.h>
 
 #define GGUF_VERSION 3
-#define CONTRACT_VERSION 2
-#define CONTRACT_VERSION_TEXT "2"
 
 typedef struct {
     char *name;
@@ -23,6 +21,7 @@ typedef struct {
 } Tensor;
 
 typedef struct {
+    uint32_t largest_sql_id;
     int vocab_size;
     int embedding_dim;
     int layer_count;
@@ -46,6 +45,8 @@ typedef struct SqlModel {
 #define MAX_CONTEXT_LENGTH 4096
 #define MAX_TENSOR_COUNT 10000
 #define GGUF_ALIGNMENT 32
+/* The 95 complete SQL tags occupy IDs 297 through 391 in the mapper decoder. */
+#define LAST_ATOMIC_TAG_ID 391
 #define MAX_METADATA_COUNT 1024
 
 typedef enum {
@@ -58,11 +59,11 @@ typedef enum {
 typedef enum {
     METADATA_ARCHITECTURE = 1u << 0,
     METADATA_ALIGNMENT = 1u << 1,
-    METADATA_CONTRACT_VERSION = 1u << 2,
-    METADATA_EPSILON = 1u << 3,
-    METADATA_ROPE_THETA = 1u << 4,
-    METADATA_FIRST_DIMENSION = 1u << 5,
-    METADATA_COMPUTE_FIELDS = (1u << 11) - 1
+    METADATA_EPSILON = 1u << 2,
+    METADATA_ROPE_THETA = 1u << 3,
+    METADATA_FIRST_DIMENSION = 1u << 4,
+    METADATA_COMPUTE_FIELDS = (1u << 10) - 1,
+    METADATA_TOKENIZER_SQL_IDS = 1u << 10
 } MetadataField;
 
 typedef struct {
@@ -319,7 +320,13 @@ static int has_expected_tensor_shape(const Tensor *tensor, const char *name,
 static int is_model_config_compatible(const ModelConfig *config, unsigned seen_fields) {
     /* Check completeness first: missing heads must not cause division by zero.
      * Present dimensions have already been validated as positive. */
-    return seen_fields == METADATA_COMPUTE_FIELDS && config->vocab_size >= 256 &&
+    if ((seen_fields & METADATA_TOKENIZER_SQL_IDS) &&
+        (config->largest_sql_id != LAST_ATOMIC_TAG_ID ||
+         config->largest_sql_id >= (uint32_t)config->vocab_size)) {
+        return 0;
+    }
+    return (seen_fields & METADATA_COMPUTE_FIELDS) == METADATA_COMPUTE_FIELDS &&
+           config->vocab_size >= 256 &&
            config->embedding_dim % config->head_count == 0 &&
            (config->embedding_dim / config->head_count) % 2 == 0 &&
            config->layer_count <= MAX_LAYERS &&
@@ -384,7 +391,7 @@ static size_t read_gguf_header(BinaryReader *reader, Model *model) {
     uint64_t tensor_count = read_uint64(reader);
     uint64_t metadata_count = read_uint64(reader);
     if (tensor_count > MAX_TENSOR_COUNT || metadata_count > MAX_METADATA_COUNT) {
-        fail("unsupported GGUF metadata contract");
+        fail("too many GGUF tensors or metadata fields");
     }
     model->tensor_count = (size_t)tensor_count;
     model->tensors = allocate_array(model->tensor_count, sizeof(Tensor));
@@ -410,20 +417,14 @@ static void read_architecture_metadata(BinaryReader *reader, uint32_t type) {
     free_array(architecture);
 }
 
-/* Managed code owns the tokenizer. Only traverse the serialized metadata to
- * locate the tensor descriptors, without allocating any token data. */
-static void skip_tokenizer_metadata(BinaryReader *reader, uint32_t type) {
+/* Skip optional GGUF fields without allocating their payloads. */
+static void skip_metadata(BinaryReader *reader, uint32_t type) {
     uint64_t count = 1;
     if (type == GGUF_ARRAY) {
         type = read_uint32(reader);
         count = read_uint64(reader);
     }
-    if (type == GGUF_UINT32) {
-        if (count > (reader->size - reader->position) / 4) {
-            fail("truncated metadata");
-        }
-        read_bytes(reader, (size_t)count * 4);
-    } else if (type == GGUF_STRING) {
+    if (type == GGUF_STRING) {
         for (uint64_t i = 0; i < count; ++i) {
             uint64_t length = read_uint64(reader);
             if (length > reader->size - reader->position) {
@@ -431,9 +432,19 @@ static void skip_tokenizer_metadata(BinaryReader *reader, uint32_t type) {
             }
             read_bytes(reader, (size_t)length);
         }
-    } else {
+        return;
+    }
+    /* Integer, float and boolean element widths in GGUF type order.
+     * String and array have no fixed width; nested arrays are invalid. */
+    static const uint8_t widths[] = {1, 1, 2, 2, 4, 4, 4, 1, 0, 0, 8, 8, 8};
+    if (type >= sizeof(widths) || !widths[type]) {
         fail("unsupported metadata type");
     }
+    size_t width = widths[type];
+    if (count > (reader->size - reader->position) / width) {
+        fail("truncated metadata");
+    }
+    read_bytes(reader, (size_t)count * width);
 }
 
 static float read_positive_float_metadata(BinaryReader *reader, uint32_t type) {
@@ -470,7 +481,6 @@ static unsigned read_dimension_metadata(BinaryReader *reader, ModelConfig *confi
             return METADATA_FIRST_DIMENSION << index;
         }
     }
-    fail("unsupported metadata key");
     return 0;
 }
 
@@ -484,11 +494,23 @@ static unsigned read_metadata_entry(BinaryReader *reader, Model *model, const ch
         read_expected_uint32(reader, type, GGUF_ALIGNMENT, "expected alignment=32");
         return METADATA_ALIGNMENT;
     }
-    if (!strcmp(key, "capstone_sql.contract_version")) {
-        read_expected_uint32(reader, type, CONTRACT_VERSION,
-                             "unsupported model contract version; re-export as "
-                             "version " CONTRACT_VERSION_TEXT);
-        return METADATA_CONTRACT_VERSION;
+    if (!strcmp(key, "capstone_sql.tokenizer.sql_ids")) {
+        if (type != GGUF_ARRAY || read_uint32(reader) != GGUF_UINT32) {
+            fail("expected uint32 SQL token ID array");
+        }
+        uint64_t count = read_uint64(reader);
+        if (!count || count > MAX_DIMENSION) {
+            fail("invalid SQL token ID count");
+        }
+        /* The managed tokenizer checks the exact whitelist and passes its mask
+         * to sql_model_generate_ids. Dimensions may follow the array. */
+        for (uint64_t i = 0; i < count; i++) {
+            uint32_t id = read_uint32(reader);
+            if (id > model->config.largest_sql_id) {
+                model->config.largest_sql_id = id;
+            }
+        }
+        return METADATA_TOKENIZER_SQL_IDS;
     }
     if (!strcmp(key, "capstone_sql.eps")) {
         model->config.norm_epsilon = read_positive_float_metadata(reader, type);
@@ -498,11 +520,11 @@ static unsigned read_metadata_entry(BinaryReader *reader, Model *model, const ch
         model->config.rope_theta = read_positive_float_metadata(reader, type);
         return METADATA_ROPE_THETA;
     }
-    if (!strncmp(key, "capstone_sql.tokenizer.", 23)) {
-        skip_tokenizer_metadata(reader, type);
-        return 0;
+    unsigned dimension = read_dimension_metadata(reader, &model->config, key, type);
+    if (!dimension) {
+        skip_metadata(reader, type);
     }
-    return read_dimension_metadata(reader, &model->config, key, type);
+    return dimension;
 }
 
 static void read_model_metadata(BinaryReader *reader, Model *model,

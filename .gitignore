@@ -39,16 +39,15 @@ CMakeUserPresets.json
 *.publishsettings
 .env
 
-# Local model bundles, including files fetched into a custom directory
-/assets/*
-!/assets/.gitkeep
+# Track model bundles in assets; ignore local copies elsewhere and SQLite sidecars.
 /models/
 *.gguf
 *.db
+!/assets/**/*.gguf
+!/assets/**/*.db
 *.db-journal
 *.db-shm
 *.db-wal
-!/fixtures/**/model.gguf
 
 # Local Python caches
 __pycache__/

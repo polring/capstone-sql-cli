@@ -1,32 +1,28 @@
-using System.Text.Json;
+using System.ComponentModel;
 using SqlApp.Models;
 using SqlApp.Services;
 using SqlApp.ViewModels;
 
 internal static class ViewModelChecks
 {
-    internal static async Task RunAsync(string tempRoot, List<AssetBundle> assets, JsonElement example, JsonElement expected)
+    internal static async Task RunAsync(string tempRoot, List<AssetBundle> assets)
     {
         string historyFolder = Path.Combine(tempRoot, "viewmodel-history");
         var history = new SessionStorageService(historyFolder);
         var dual = assets.Single(b => b.FrontModelPath.Length > 0 && b.BackModelPath.Length > 0);
-        string question = example.GetProperty("input").GetString()!, taggedQuestion = example.GetProperty("output").GetString()!;
-        string generalized = expected.GetProperty("generalizedQuestion").GetString()!, taggedSql = expected.GetProperty("taggedSql").GetString()!;
-        string ambiguous = question.Replace("kitchen category", "kitchen home category", StringComparison.Ordinal);
         const string numeric = "find items over 20 red limits";
-        string categorySql = taggedSql;
+        const string question = "please show me items";
+        const string frontOutput = "Whatthe <items> are there?";
         var roles = new List<PipelineStage>();
         using var inference = new InferenceService();
         Task<InferenceResult> Predict(PipelineStage stage, string model, string input, int limit)
         {
             roles.Add(stage);
-            Require(limit == 64, "Selected token budget");
-            if (stage == PipelineStage.Front && model == dual.FrontModelPath && (input == question || input == ambiguous))
-                return Task.FromResult(new InferenceResult(taggedQuestion, "eos", 0.75));
-            if (stage == PipelineStage.Back && model == dual.BackModelPath && input == generalized)
-                return Task.FromResult(new InferenceResult(categorySql, "eos", 2.25));
+            Require(limit == 200, "Default token budget for each model stage");
             if (stage == PipelineStage.Front && model == dual.FrontModelPath && input == numeric)
                 return Task.FromResult(new InferenceResult("find <items> over [AGG_VALUE, numeric, #1] <items.category, string>", "eos", 0.75));
+            if (stage == PipelineStage.Front && model == dual.FrontModelPath && input == question)
+                return Task.FromResult(new InferenceResult(frontOutput, "eos", 0.75));
             if (stage == PipelineStage.Back && model == dual.BackModelPath && input == "find <TABLE1> over [AGG_VALUE, numeric, #1] <TABLE1.COL1, string>")
                 return Task.FromResult(new InferenceResult("SELECT {COUNT(*)} FROM <TABLE1> HAVING COUNT(*) > [AGG_VALUE, numeric, #1]", "eos", 2.25));
             throw new InvalidOperationException($"Unexpected model input for {stage}");
@@ -35,11 +31,9 @@ internal static class ViewModelChecks
         var vm = new MainViewModel(assets.ToList(), history, inference, Predict);
         await vm.Initialization;
         Require(vm.IsSingleMode && vm.AvailableBundles.All(b => !b.IsDual), "New single-model conversation");
+        await VerifyWelcomeSuggestionsAsync(vm, dual);
         vm.SelectBundle(assets.Single(b => !b.IsDual));
-        string singleInputFile = Path.Combine(tempRoot, "single-question.json");
-        await File.WriteAllTextAsync(singleInputFile, """{"question":"hello"}""");
-        await vm.ImportJsonFileAsync(singleInputFile);
-        Require(vm.InputText == "hello", "Single-model chat can still import a question");
+        vm.InputText = "hello";
         await vm.SendMessageAsync();
         Require(vm.SelectedSession!.Messages.Last() is { HasError: false, ComputeTimeMs: > 0 },
             "Single-model chat records real forward time");
@@ -56,9 +50,9 @@ internal static class ViewModelChecks
         Require(vm.SelectedRange == new StageRange(PipelineStage.Front, PipelineStage.Front) && vm.StatusMessage.Length == 0,
             "A schema-only folder cannot introduce a mapper-only slider selection");
         int beforeSend = session.Messages.Count;
-        vm.InputText = question;
+        vm.InputText = numeric;
         await vm.SendMessageAsync();
-        Require(vm.StatusMessage.Length > 0 && vm.InputText == question && session.Messages.Count == beforeSend && roles.Count == 0,
+        Require(vm.StatusMessage.Length > 0 && vm.InputText == numeric && session.Messages.Count == beforeSend && roles.Count == 0,
             "Report the missing front model on send and keep the draft");
         vm.SelectBundle(dual);
         Require(vm.IsDualMode && vm.AvailableBundles.All(b => b.IsDual) && vm.CurrentSessionBundle == dual,
@@ -66,68 +60,7 @@ internal static class ViewModelChecks
         Require(vm.SelectedRange == new StageRange(PipelineStage.Front, PipelineStage.Postprocessor), "Complete bundle default");
         VerifySliderRanges(vm);
 
-        foreach (var end in new[] { PipelineStage.Front, PipelineStage.Back })
-        {
-            vm.SelectRange(new(PipelineStage.Front, end));
-            vm.InputText = question;
-            await vm.SendMessageAsync();
-            var partial = session.Messages.Last();
-            Require(!partial.HasError && !partial.CanExecuteSql && partial.PipelineRun?.Steps.Last().Stage == end,
-                $"A typed question executes through the selected {end} endpoint");
-        }
-        vm.SelectRange(new(PipelineStage.Front, PipelineStage.Mapper));
-        vm.InputText = question;
-        await vm.ImportJsonFileAsync(Path.Combine(AppContext.BaseDirectory, "category.json"));
-        Require(vm.InputText == question, "An attached training pair cannot overwrite a dual-model draft");
-        await vm.SendMessageAsync();
-        var front = session.Messages.Last();
-        Require(front.PipelineRun?.Mapping != null && !front.CanExecuteSql && session.Messages[^2].Text == question &&
-            front.PipelineRun.Steps.First().Input == question && front.PipelineRun.Steps.Last().Input == taggedQuestion,
-            "One typed question feeds the front model and its output feeds the mapper");
-        Require(front.ComputeTimeMs == 0.75, "Front compute time reaches chat");
-
-        vm.SelectRange(new(PipelineStage.Back, PipelineStage.Back));
-        Require(vm.InputText.Length == 0, "Selecting a back-only range leaves the chat empty");
-        string frontMappingJson = front.PipelineRun!.SerializeMappings();
-        using var frontMappings = JsonDocument.Parse(frontMappingJson);
-        CandidatePipelineChecks.VerifyEnvelope(frontMappings.RootElement, session.Id, front.Id);
-        Require(frontMappings.RootElement.GetProperty("Candidates").GetArrayLength() == 1,
-            "A single candidate is carried in the same envelope");
-        vm.InputText = generalized;
-        await vm.SendMessageAsync();
-        var back = session.Messages.Last();
-        Require(back.PipelineRun?.TaggedSql == taggedSql && back.PipelineRun.Mappings == null && !back.CanExecuteSql,
-            "Back-only produces tagged SQL without carrying a previous mapper result");
-        Require(back.ComputeTimeMs == 2.25, "Back compute time reaches chat");
-        Require(vm.StatusMessage.Length == 0, "Successful inference clears the composer status");
-
         vm.SelectRange(new(PipelineStage.Front, PipelineStage.Postprocessor));
-        roles.Clear();
-        vm.InputText = question;
-        await vm.SendMessageAsync();
-        var final = session.Messages.Last();
-        Require(final is { HasError: false, ComputeTimeMs: 3.0, CanExecuteSql: true } &&
-            final.Sql == expected.GetProperty("finalSql").GetString() && roles.SequenceEqual([PipelineStage.Front, PipelineStage.Back]),
-            "A full-range question calls each model once, records their time and returns executable SQL");
-
-        vm.InputText = ambiguous;
-        roles.Clear();
-        await vm.SendMessageAsync();
-        var choices = session.Messages.Last();
-        Require(roles.SequenceEqual([PipelineStage.Front, PipelineStage.Back]) && choices.SqlCandidates.Count == 2 &&
-            choices.SqlCandidates.All(c => c.CanExecuteSql && !c.HasValidationError),
-            "The same run supplies both candidate mappings to postprocessing after a single back-model call");
-
-        categorySql = taggedSql + " AND";
-        vm.InputText = ambiguous;
-        await vm.SendMessageAsync();
-        categorySql = taggedSql;
-        var invalid = session.Messages.Last();
-        Require(invalid.SqlCandidates.Count == 2 && invalid.SqlCandidates.All(c =>
-            c.Sql.EndsWith(" AND") && c.HasValidationError && !c.CanExecuteSql), "Show both invalid SQL texts and disable each one");
-        await vm.RunCandidateAsync(invalid.SqlCandidates[0]);
-        Require(session.Messages.All(m => m.SourceMessageId != invalid.Id), "A disabled candidate cannot run through the command");
-
         vm.InputText = numeric;
         await vm.SendMessageAsync();
         var mixed = session.Messages.Last();
@@ -135,65 +68,145 @@ internal static class ViewModelChecks
             mixed.SqlCandidates.Count(c => c.CanExecuteSql && c.Sql == "SELECT COUNT(*) FROM items HAVING COUNT(*) > 20") == 1 &&
             mixed.SqlCandidates.Count(c => !c.CanExecuteSql && c.HasValidationError && c.Sql.Length == 0) == 1,
             "One unparseable numeric source value leaves the other SQL candidate available");
+        await vm.RunCandidateAsync(mixed.SqlCandidates.Single(c => c.CanExecuteSql));
+        Require(session.Messages.Any(m => m.SourceMessageId == mixed.Id && m.QueryResult is { HasError: false }),
+            "A full dual run can execute its valid SQL candidate");
+        await VerifyPartialOutputsAsync(vm, history, assets, dual.DbPath);
 
-        vm.SetDualMode(false);
-        Require(vm.CurrentSessionBundle?.DbPath != final.DbPath, "Switch current database before replay");
-        await vm.RunSqlAsync(final);
-        Require(session.Messages.Single(m => m.Id == final.ResultMessageId).QueryResult?.Rows.Single().Single() == "cup",
-            "Run against original database");
-        var cup = choices.SqlCandidates.Single(c => c.Sql.EndsWith("'kitchen'"));
-        var empty = choices.SqlCandidates.Single(c => c.Sql.EndsWith("'kitchen home'"));
-        await vm.RunCandidateAsync(empty);
-        await vm.RunCandidateAsync(cup);
-        await vm.RunCandidateAsync(empty);
-        var results = session.Messages.Where(m => m.SourceMessageId == choices.Id).ToList();
-        Require(results.Count == 2 && results.Single(m => m.Sql == cup.Sql).QueryResult?.Rows.Single().Single() == "cup" &&
-            results.Single(m => m.Sql == empty.Sql).QueryResult?.RowCount == 0,
-            "Each candidate executes against the original database and reruns update only its own result");
+        vm.InputText = question;
+        await vm.SendMessageAsync();
+        var failed = session.Messages.Last();
+        var mapper = failed.PipelineRun!.Steps.Last();
+        Require(mapper.Stage == PipelineStage.Mapper && mapper.Input == frontOutput && mapper.Error.Length > 0,
+            "A changed front-model sentence fails the mapper's source alignment");
+        string expectedDetails = $"원문 질문\n{question}\n\n매퍼 입력\n{frontOutput}\n\n오류 원인\n{mapper.Error}";
         await history.SaveSessionsAsync(vm.Sessions);
-        using var stored = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(historyFolder, "sessions.json")));
-        var storedChoices = stored.RootElement[0].GetProperty("Messages").EnumerateArray()
-            .Single(m => m.GetProperty("Id").GetGuid() == choices.Id);
-        var storedMappings = storedChoices.GetProperty("PipelineRun").GetProperty("Mappings");
-        CandidatePipelineChecks.VerifyEnvelope(storedMappings, session.Id, choices.Id);
-        Require(storedMappings.GetProperty("Candidates").EnumerateArray().Select(record =>
-                record.GetProperty("Values").GetProperty("[TABLE1.COL2, string, #1]").GetString())
-            .Order(StringComparer.Ordinal).SequenceEqual(["kitchen", "kitchen home"]),
-            "Save the condition string for every candidate in the conversation");
-        var reopened = new MainViewModel(assets.ToList(), history, inference, Predict);
-        await reopened.Initialization;
-        var saved = reopened.SelectedSession!;
-        var restored = saved.Messages.Single(m => m.Id == choices.Id);
-        Require(restored.SqlCandidates.Count == 2 && restored.SqlCandidates.All(c => c.CanExecuteSql) &&
-            saved.Messages.Count(m => m.SourceMessageId == restored.Id) == 2 &&
-            saved.Messages.Single(m => m.Id == invalid.Id).SqlCandidates.All(c => c.HasValidationError),
-            "History restores every candidate, its validated state, and its own result");
+        var restored = (await history.LoadSessionsAsync(assets)).Single(s => s.Id == session.Id);
+        foreach (var message in new[] { failed, restored.Messages.Single(m => m.Id == failed.Id) })
+            Require(message.HasError && message.ErrorMessage == mapper.Error && message.HasMapperError &&
+                message.ShowStageDetails && !message.ShowPipelineOutput && message.MapperErrorDetails == expectedDetails &&
+                message.StageDetails.Contains("[앞모델 ·") && message.StageDetails.Contains($"[매퍼 · 실패]\n입력\n{question}\n{frontOutput}") &&
+                message.StageDetails.Contains(mapper.Error) && !message.StageDetails.Contains("[뒷모델 ·"),
+                "Mapper failures retain both the error details and the stages actually reached, including after reload");
 
-        reopened.SetDualMode(true);
-        reopened.SelectBundle(dual);
-        Require(reopened.InputText.Length == 0, "Restoring a session leaves the chat empty");
-        using var replayMappings = JsonDocument.Parse(restored.PipelineRun!.SerializeMappings());
-        CandidatePipelineChecks.VerifyEnvelope(replayMappings.RootElement, saved.Id, choices.Id);
-        reopened.InputText = ambiguous;
-        roles.Clear();
-        await reopened.SendMessageAsync();
-        var replay = saved.Messages.Last();
-        Require(!replay.HasError && roles.SequenceEqual([PipelineStage.Front, PipelineStage.Back]) &&
-            replay.PipelineRun!.Mappings?.MessageId == replay.Id &&
-            replay.SqlCandidates.Select(c => c.Sql).SequenceEqual(restored.SqlCandidates.Select(c => c.Sql)),
-            "After restart, a new full range builds its own mappings and restores both candidates");
+        vm.InputText = "unexpected front-model input";
+        await vm.SendMessageAsync();
+        var frontFailure = session.Messages.Last();
+        Require(frontFailure.HasError && !frontFailure.HasMapperError && frontFailure.ShowStageDetails,
+            "A full run failing in the front model retains its stage details without a mapper detail button");
+    }
 
-        reopened.CreateNewSession();
-        reopened.SetDualMode(true);
-        reopened.SelectBundle(dual);
-        reopened.SelectRange(new(PipelineStage.Back, PipelineStage.Postprocessor));
-        reopened.InputText = generalized;
-        roles.Clear();
-        await reopened.SendMessageAsync();
-        var standalone = reopened.SelectedSession!.Messages.Last();
-        Require(!standalone.HasError && standalone.PipelineRun?.Mappings == null && roles.SequenceEqual([PipelineStage.Back]),
-            "A new conversation snaps back-through-post to back-only and uses no historical mapping");
-        await history.SaveSessionsAsync(reopened.Sessions);
+    private static async Task VerifyWelcomeSuggestionsAsync(MainViewModel vm, AssetBundle dual)
+    {
+        string[] singleExamples = vm.PromptSuggestions.ToArray();
+        string singleDescription = vm.WelcomeDescription;
+        Require(singleExamples.Length == 3 && singleExamples.Contains("please show me information of peter."),
+            "The single-model welcome screen retains its original examples");
+
+        vm.SetDualMode(true);
+        vm.SelectBundle(dual);
+        await vm.LoadSchemaAsync();
+        var changed = new HashSet<string?>();
+        void TrackChanges(object? sender, PropertyChangedEventArgs e) => changed.Add(e.PropertyName);
+        vm.PropertyChanged += TrackChanges;
+        var descriptions = new HashSet<string>();
+        foreach (var range in new StageRange[] {
+            new(PipelineStage.Front, PipelineStage.Front), new(PipelineStage.Front, PipelineStage.Mapper),
+            new(PipelineStage.Front, PipelineStage.Back), new(PipelineStage.Front, PipelineStage.Postprocessor),
+            new(PipelineStage.Back, PipelineStage.Back) })
+        {
+            string previousDraft = vm.InputText;
+            changed.Clear();
+            vm.SelectRange(range);
+            Require(vm.InputText == previousDraft && changed.Contains(nameof(vm.WelcomeDescription)) &&
+                !string.IsNullOrWhiteSpace(vm.WelcomeDescription) && descriptions.Add(vm.WelcomeDescription),
+                $"Selecting {range} refreshes its distinct welcome instructions without replacing the draft");
+            var examples = vm.PromptSuggestions;
+            Require(examples.Count == 3 && examples.Distinct().Count() == 3 && examples.All(s => !string.IsNullOrWhiteSpace(s)),
+                $"{range} displays three different example inputs");
+            if (range.Start == PipelineStage.Back)
+                Require(changed.Contains(nameof(vm.PromptSuggestions)) && examples.All(s => s.Contains("TABLE1")),
+                    "Back-only selection refreshes the list with generalized questions");
+            else
+                Require(examples.Any(s => s.Contains("items", StringComparison.OrdinalIgnoreCase)) &&
+                    examples.All(s => !s.Contains("TABLE1")), "Front-led examples use names from the selected database");
+
+            foreach (var example in examples)
+            {
+                vm.UsePromptSuggestionCommand.Execute(example);
+                Require(vm.InputText == example && !vm.SelectedSession!.HasMessages,
+                    $"Choosing an example in {range} fills the composer and waits for Send");
+            }
+        }
+        vm.PropertyChanged -= TrackChanges;
+        vm.SetDualMode(false);
+        Require(vm.WelcomeDescription == singleDescription && vm.PromptSuggestions.SequenceEqual(singleExamples),
+            "Switching back to single mode restores its welcome description and examples");
+    }
+
+    private static async Task VerifyPartialOutputsAsync(MainViewModel vm, SessionStorageService history,
+        List<AssetBundle> assets, string db)
+    {
+        var session = vm.SelectedSession!;
+        var stages = Enum.GetValues<PipelineStage>();
+        var full = new StageRange(PipelineStage.Front, PipelineStage.Postprocessor);
+        var expected = new Dictionary<Guid, string>();
+        foreach (var start in stages)
+        foreach (var end in stages.Where(stage => stage >= start))
+        {
+            var range = new StageRange(start, end);
+            if (range == full) continue;
+            // Older partial runs ending at the postprocessor can contain valid restored SQL.
+            string output = end == PipelineStage.Postprocessor ? "SELECT 1" : $"Output from {end}";
+            var run = new PipelineRun { Range = range };
+            foreach (var stage in stages.Where(range.Contains))
+                run.Steps.Add(new() { Stage = stage, Input = $"Input for {stage}", Output = $"Output from {stage}" });
+            run.Steps[^1].Output = output;
+            if (end == PipelineStage.Postprocessor) run.FinalSqlCandidates.Add(new() { Sql = output });
+            if (start == PipelineStage.Mapper && end == PipelineStage.Postprocessor)
+            {
+                run.FinalSqlCandidates.Add(new() { Sql = "SELECT 2" });
+                run.Steps[^1].Output = "복원된 SQL 2개 · 복원 실패 0개";
+                output = "SELECT 1\n\nSELECT 2";
+            }
+            var message = new ChatMessage
+            {
+                Sender = MessageSender.Assistant, DbPath = db, PipelineRun = run, Sql = run.FinalSql
+            };
+            session.Messages.Add(message);
+            expected.Add(message.Id, output);
+        }
+        // The active UI range is still full. Each saved response must use its own recorded range.
+        await history.SaveSessionsAsync(vm.Sessions);
+        var restored = (await history.LoadSessionsAsync(assets)).Single(s => s.Id == session.Id);
+        var partials = restored.Messages.Where(m => m.PipelineRun is { } run && run.Range != full).ToList();
+        Require(partials.Count == 9 && partials.All(m => !m.IsFullPipelineRun && m.ShowStageDetails && m.ShowPipelineOutput &&
+            !m.HasSqlCandidates && !m.CanExecuteSql && m.PipelineOutput == expected[m.Id]),
+            "Every partial range keeps its plain-text output and offers stage details after reload");
+        foreach (var message in partials)
+        {
+            var run = message.PipelineRun!;
+            string details = message.StageDetails;
+            Require(stages.All(stage => details.Contains("[" + ChatMessage.StageLabel(stage) + " ·") == run.Range.Contains(stage)) &&
+                run.Steps.All(step => details.Contains(step.Input)) &&
+                run.Steps.Where(step => step.Stage != PipelineStage.Postprocessor).All(step => details.Contains(step.Output)) &&
+                run.FinalSqlCandidates.All(candidate => details.Contains(candidate.Sql)),
+                $"Details for {run.Range} contain inputs and outputs only for the recorded stages");
+        }
+        var empty = new ChatMessage { Sender = MessageSender.Assistant, PipelineRun = new() { Range = full } };
+        Require(!empty.ShowStageDetails && empty.StageDetails.Length == 0, "An empty run has no details to open");
+        var final = restored.Messages.Single(m => m.PipelineRun?.Range == full);
+        Require(final.IsFullPipelineRun && final.ShowStageDetails && !final.HasMapperError &&
+            !final.ShowPipelineOutput && final.SqlCandidates.Any(c => c.CanExecuteSql) &&
+            final.StageDetails.Contains("20 = [AGG_VALUE, numeric, #1]") &&
+            final.StageDetails.Contains("20 red = [AGG_VALUE, numeric, #1]") &&
+            final.PipelineRun!.FinalSqlCandidates.All(c => final.StageDetails.Contains(c.Error.Length > 0 ? c.Error : c.Sql)),
+            "The full run retains its executable SQL and the complete set of mappings in its details");
+        var replay = session.Messages.Last();
+        int count = session.Messages.Count;
+        await vm.RunSqlAsync(replay);
+        Require(session.Messages.Count == count && replay.ResultMessageId == null,
+            "A postprocessor-only reply cannot execute its stored SQL");
     }
 
     private static void VerifySliderRanges(MainViewModel vm)

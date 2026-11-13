@@ -1,4 +1,4 @@
 /scripts/fetch-asset text eol=lf
 /Makefile text eol=lf
-/fixtures/**/cases.txt text eol=lf
 *.gguf binary
+/assets/**/*.db binary

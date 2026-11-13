@@ -1,5 +1,0 @@
-{
-  "generalizedQuestion": "what are the {TABLE1.COL1, string} of the things from the [TABLE1.COL2, string, #1] <TABLE1.COL2, string>?",
-  "taggedSql": "SELECT {TABLE1.COL1, string} FROM <TABLE1> WHERE <TABLE1.COL2, string> = '[TABLE1.COL2, string, #1]'",
-  "finalSql": "SELECT item_name FROM items WHERE category = 'kitchen'"
-}
