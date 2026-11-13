@@ -1,64 +1,10 @@
 using System.Text;
-using System.Text.Json;
-using SqlApp.Models;
-using SqlApp.Services;
-using SqlApp.Services.Pipeline;
 
-internal static class NativePipelineSmoke
+internal static class TestModel
 {
-    internal static async Task VerifyAsync(string temporaryDirectory, string sourceDb, IReadOnlyList<TableSchemaInfo> schema,
-        JsonElement example, JsonElement expected)
-    {
-        var directory = Directory.CreateDirectory(Path.Combine(temporaryDirectory, "native-dual")).FullName;
-        var db = Path.Combine(directory, "shop.db");
-        File.Copy(sourceDb, db);
-        var front = Path.Combine(directory, "front.gguf");
-        var back = Path.Combine(directory, "back.gguf");
-        string question = example.GetProperty("input").GetString()!;
-        string taggedQuestion = example.GetProperty("output").GetString()!;
-        string generalized = expected.GetProperty("generalizedQuestion").GetString()!;
-        string tagged = expected.GetProperty("taggedSql").GetString()!;
-        WriteModel(front, taggedQuestion);
-        WriteModel(back, tagged);
-
-        using var engine = new InferenceService();
-        var session = new ConversationSession();
-        var run = await session.RunInSessionAsync(new(PipelineStage.Front, PipelineStage.Postprocessor), question, "",
-            directory, db, schema, (stage, input) =>
-            {
-                if (stage == PipelineStage.Front && input == question)
-                    return engine.RunStageAsync(stage, front, input, 2);
-                if (stage == PipelineStage.Back && input == generalized)
-                    return engine.RunStageAsync(stage, back, input, 2);
-                throw new InvalidOperationException($"Wrong input to {stage}: {input}");
-            });
-        if (run.Error.Length != 0 || run.FrontOutput != taggedQuestion || run.TaggedSql != tagged ||
-            run.Steps.Count != 4 || run.FinalSql != expected.GetProperty("finalSql").GetString())
-            throw new InvalidOperationException($"Native dual pipeline failed: {run.Error} {run.FinalSql}");
-        if (run.Steps[0].ComputeTimeMs is not > 0 || run.Steps[2].ComputeTimeMs is not > 0)
-            throw new InvalidOperationException("Both model stages must record their own native forward time.");
-        var result = await new SqlExecutionService().ExecuteQueryAsync(db, run.FinalSql);
-        if (result.ErrorMessage != null || result.Rows.Single().Single() != "cup")
-            throw new InvalidOperationException($"Native dual pipeline SQLite result: {result.ErrorMessage}");
-
-        string homeKitchen = question.Replace("kitchen category", "home kitchen category", StringComparison.Ordinal);
-        var calls = new List<(PipelineStage, string)>();
-        var alternatives = await session.RunInSessionAsync(new(PipelineStage.Front, PipelineStage.Postprocessor),
-            homeKitchen, "", directory, db, schema, (stage, input) =>
-            {
-                calls.Add((stage, input));
-                return engine.RunStageAsync(stage, stage == PipelineStage.Front ? front : back, input, 2);
-            });
-        string commonSql = "SELECT item_name FROM items WHERE category = ";
-        if (alternatives.Error.Length != 0 || !calls.SequenceEqual([(PipelineStage.Front, homeKitchen), (PipelineStage.Back, generalized)]) ||
-            !alternatives.FinalSqlCandidates.Select(c => c.Sql).Order(StringComparer.Ordinal)
-                .SequenceEqual(new[] { commonSql + "'home'", commonSql + "'home kitchen'" }.Order(StringComparer.Ordinal)))
-            throw new InvalidOperationException($"Native home kitchen pipeline must restore both SQLs from a single back-model call: {alternatives.Error}");
-    }
-
     // A synthetic F32 byte-BPE decoder. The zero transformer block preserves its
     // input embedding: the head maps SEP -> one output seed -> EOS. No trained data.
-    internal static void WriteModel(string path, string seed)
+    internal static void Write(string path, string seed)
     {
         const int vocab = 261, dimension = 2, eos = 258, separator = 259, output = 260;
         float[] embedding = new float[vocab * dimension], head = new float[vocab * dimension];

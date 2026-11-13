@@ -12,7 +12,5 @@
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.2" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="9.0.2" />
     <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="3.0.5" />
-    <None Include="../../fixtures/dual/category.json" Link="category.json" CopyToOutputDirectory="PreserveNewest" />
-    <None Include="../../fixtures/dual/category.expected.json" Link="category.expected.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

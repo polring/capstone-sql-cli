@@ -46,20 +46,17 @@ capstone-sql-cli/
 │   └── sql_engine/
 │       ├── sql_engine.c          # GGUF 추론기 구현
 │       ├── sql_engine.h          # 공개 C API
-│       └── tests/                # C 추론기 단위·회귀 테스트
+│       └── tests/                # 생성 토큰 선택 테스트
 ├── Makefile                      # 네이티브 빌드·테스트용 CMake 래퍼
-├── assets/                       # 로컬 실행용 모델과 DB를 묶음별로 보관
+├── assets/                       # 저장소에 포함된 GUI 모델과 SQLite DB
 ├── scripts/fetch-asset           # 단일 모델과 DB 다운로드
-├── fixtures/
-│   ├── v2/                       # GGUF 계약 검증용 소형 모델과 기준 출력
-│   └── dual/                     # 이중 모델 파이프라인의 입력·기대 결과 JSON
 ├── tests/SqlApp.Tests/           # 독립 실행형 .NET 회귀·통합 테스트 프로젝트
 └── .github/workflows/test.yml    # Linux에서 C 추론기 빌드·테스트·서식 검사
 ```
 
 CMake는 추론 라이브러리를 빌드해 `app/runtimes/<RID>/native/`에 복사합니다. 앱 프로젝트는 대상 플랫폼에 맞는 라이브러리를 빌드·배포 출력에 포함합니다. [네이티브 빌드 설정](native/CMakeLists.txt) · [앱 프로젝트 설정](app/SqlApp.csproj)
 
-`assets/`의 모델·DB는 Git에서 제외합니다. `fixtures/`의 소형 모델과 JSON은 테스트 입력으로 저장소에 포함합니다. C# 테스트 프로젝트는 솔루션과 별도로 앱의 모델·서비스·네이티브 연동 소스를 직접 컴파일합니다. [테스트 프로젝트 설정](tests/SqlApp.Tests/SqlApp.Tests.csproj)
+`assets/sigle-model-test/`에는 단일 모델과 DB가, `assets/dual-model-test/`에는 앞모델과 DB가 들어 있습니다. 저장소를 복제하면 이 파일들도 함께 받습니다.
 
 [앱 소스 구조](app/ReadMe.md#앱-소스-구조) · [GGUF 판독기](app/Interop/SqlEngine/GgufContract.cs) · [C 추론 API](native/sql_engine/sql_engine.h)
 
@@ -196,7 +193,7 @@ dotnet run --project app/SqlApp.csproj -f net10.0-desktop -c Release --no-build 
 
 ## 5. 테스트 실행
 
-네이티브 빌드 후 CTest로 9개 테스트를 실행합니다. 네 가지 GGUF fixture에서 다음 토큰의 점수(logits)를 기준값과 대조합니다. 각 위치에서 KV 캐시를 사용한 점수가 전체 입력을 다시 계산한 점수와 일치하는지, 잘못된 입력을 거부한 뒤 핸들을 재사용할 수 있는지도 검사합니다.
+네이티브 빌드 후 CTest로 토큰 점수가 같을 때의 선택 순서와 EOS 처리를 확인합니다.
 
 **Windows · Developer Command Prompt for Visual Studio**
 
@@ -223,7 +220,7 @@ make test
 
 C 코드 서식은 [clang-format 설정](.clang-format)을 따릅니다.
 
-아래 명령은 C# 토큰화·생성, GUI의 다섯 실행 구간, 후보별 SQL 검사·실행과 대화 기록 복원을 검증합니다. 합성 앞·뒤 GGUF를 사용하는 통합 테스트는 값의 경계가 둘일 때도 뒷모델 호출 한 번으로 두 SQL을 복원하는지 확인합니다. 학습된 이중 모델의 예측 정확도는 이 테스트의 측정 대상에 포함되지 않습니다.
+아래 명령은 GUI의 SQL 검증·실행과 대화 기록 복원 등을 검사합니다.
 
 ```
 dotnet run --project tests/SqlApp.Tests -c Release

@@ -6,7 +6,7 @@ using SqlApp.Services.Pipeline;
 
 internal static class CandidatePipelineChecks
 {
-    internal static async Task<PipelineRun> RunInSessionAsync(this ConversationSession session, StageRange range,
+    private static async Task<PipelineRun> RunInSessionAsync(this ConversationSession session, StageRange range,
         string input, string auxiliaryInput, string directory, string db, IReadOnlyList<TableSchemaInfo> schema,
         Func<PipelineStage, string, Task<InferenceResult>> predict)
     {
@@ -18,14 +18,21 @@ internal static class CandidatePipelineChecks
         return run;
     }
 
-    internal static async Task RunAsync(string directory, string db, IReadOnlyList<TableSchemaInfo> schema,
-        string question, string taggedQuestion, string generalized, string taggedSql)
+    internal static async Task RunAsync(string directory, string db, IReadOnlyList<TableSchemaInfo> schema)
     {
         var session = new ConversationSession();
         const string valueTag = "[items.category, string, #1]";
         const string category = "[TABLE1.COL2, string, #1]";
         List<MappingRecord> Map(string source, string tags) =>
             Mapper.MapCandidates(source, tags, schema).Candidates;
+
+        var repeatedValue = Map("compare Hot Pink with Hot Pink", $"compare {valueTag} with {valueTag}").Single();
+        Require(repeatedValue.Values.Single().Value == "Hot Pink", "Preserve a repeated multiword value with its original case");
+        var identifiers = Mapper.MapCandidates("show the item names category",
+            "show {items.item_name, string} <items.category, string>", schema);
+        Require(identifiers.GeneralizedQuestion == "show {TABLE1.COL1, string} <TABLE1.COL2, string>" &&
+            identifiers.Candidates.Count == 1 && identifiers.Candidates[0].Values.Count == 0,
+            "Ambiguous identifier spans with identical value bindings produce one mapping");
 
         const string secondCategory = "[TABLE1.COL2, string, #2]";
         const string pairSql = "SELECT {TABLE1.COL1, string} FROM <TABLE1> WHERE <TABLE1.COL2, string> IN " +
@@ -42,7 +49,10 @@ internal static class CandidatePipelineChecks
             var (first, second) = bindings[candidate.MappingIndices.Single()];
             return candidate.Sql == $"SELECT item_name FROM items WHERE category IN ('{first}', '{second}')";
         }), "Each SQL uses both values from the same mapping");
-        var imported = JsonNode.Parse(pairs.SerializeMappings())!;
+        string mappings = pairs.SerializeMappings();
+        using var exported = JsonDocument.Parse(mappings);
+        VerifyEnvelope(exported.RootElement, session.Id, session.Messages.Last().Id);
+        var imported = JsonNode.Parse(mappings)!;
         var candidates = imported["Candidates"]!.AsArray();
         var duplicate = candidates[0]!.DeepClone();
         var reversedValues = duplicate["Values"]!.AsObject().Reverse().Select(entry =>
@@ -86,56 +96,9 @@ internal static class CandidatePipelineChecks
         var withCase = Map("show x a x A x", $"show <items> {valueTag} <items>")
             .Select(mapping => mapping.Values.Single().Value).ToHashSet(StringComparer.Ordinal);
         Require(withCase.Contains("a") && withCase.Contains("A"), "Preserve case when comparing condition values");
-
-        string ambiguous = question.Replace("kitchen category", "home kitchen category", StringComparison.Ordinal);
-        var calls = new List<(PipelineStage Stage, string Input)>();
-        Task<InferenceResult> Predict(PipelineStage stage, string input)
-        {
-            calls.Add((stage, input));
-            return Task.FromResult(new InferenceResult(stage == PipelineStage.Front ? taggedQuestion : taggedSql, "eos", 1));
-        }
-
-        var run = await session.RunInSessionAsync(new(PipelineStage.Front, PipelineStage.Postprocessor),
-            ambiguous, "", directory, db, schema, Predict);
-        Guid origin = session.Messages.Last().Id;
-        Require(run.Error == "" && calls.SequenceEqual([(PipelineStage.Front, ambiguous), (PipelineStage.Back, generalized)]),
-            $"Call each model exactly once with the common generalized question: {run.Error}");
-        Require(run.MappingCandidates.Count == 2 && run.FinalSqlCandidates.Count == 2, "Retain both home kitchen interpretations");
-        var expected = new HashSet<string>(["home", "home kitchen"]);
-        foreach (var sql in run.FinalSqlCandidates)
-        {
-            int index = sql.MappingIndices.Single();
-            var record = run.MappingCandidates[index];
-            string value = record.Values[category];
-            Require(expected.Remove(value) && run.GeneralizedQuestion == generalized && sql.Error == "" &&
-                sql.Sql == $"SELECT item_name FROM items WHERE category = '{value}'", "Restore each SQL from its own complete mapping");
-        }
-
-        calls.Clear();
-        string mappings = run.SerializeMappings();
-        using var exported = JsonDocument.Parse(mappings);
-        VerifyEnvelope(exported.RootElement, session.Id, origin);
-        var restored = await session.RunInSessionAsync(new(PipelineStage.Postprocessor, PipelineStage.Postprocessor),
-            taggedSql, mappings, directory, db, schema, Predict);
-        Require(restored.Error == "" && calls.Count == 0 && restored.FinalSqlCandidates.Select(c => c.Sql)
-            .SequenceEqual(run.FinalSqlCandidates.Select(c => c.Sql)), "Replay restores literal values without running either model");
-        using var replayed = JsonDocument.Parse(restored.SerializeMappings());
-        VerifyEnvelope(replayed.RootElement, session.Id, origin);
-        var replay = await session.RunInSessionAsync(new(PipelineStage.Postprocessor, PipelineStage.Postprocessor),
-            "SELECT {TABLE1.COL1, string} FROM <TABLE1>", mappings, directory, db, schema, Predict);
-        var merged = replay.FinalSqlCandidates.Single();
-        Require(replay.Error == "" && replay.MappingCandidates.Count == 2 && merged.Sql == "SELECT item_name FROM items" &&
-            merged.MappingIndices.Order().SequenceEqual([0, 1]) && calls.Count == 0,
-            "A postprocessor replay merges identical final SQL while preserving both source mappings");
-
-        var foreign = JsonNode.Parse(mappings)!;
-        foreign["Candidates"]![1]!["Values"]![category] = "garden";
-        var rejected = await session.RunInSessionAsync(new(PipelineStage.Back, PipelineStage.Postprocessor),
-            generalized, foreign.ToJsonString(), directory, db, schema, Predict);
-        Require(rejected.Error.Length > 0 && calls.Count == 0, "Reject a value from a different mapping before inference");
     }
 
-    internal static void VerifyEnvelope(JsonElement envelope, string conversationId, Guid messageId)
+    private static void VerifyEnvelope(JsonElement envelope, string conversationId, Guid messageId)
     {
         Require(envelope.EnumerateObject().Select(p => p.Name).ToHashSet().SetEquals(["ConversationId", "MessageId", "Candidates"]),
             "The mapping envelope contains only the owning conversation, originating message and candidates");

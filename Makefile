@@ -1,4 +1,4 @@
-# Native engine and contract tests. The GUI is built with dotnet.
+# Native engine and tests. The GUI is built with dotnet.
 BUILD_DIR ?= build
 CONFIG ?= Release
 

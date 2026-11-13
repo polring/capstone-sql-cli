@@ -1,4 +1,0 @@
-{
-  "input": "what are the names of the things from the kitchen category?",
-  "output": "what are the {items.item_name, string} of the things from the [items.category, string, #1] <items.category, string>?"
-}

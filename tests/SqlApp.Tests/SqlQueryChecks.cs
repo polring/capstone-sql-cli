@@ -41,7 +41,7 @@ internal static class SqlQueryChecks
         AssetBundle MakeBundle(string name, string output)
         {
             string folder = Directory.CreateDirectory(Path.Combine(tempRoot, name)).FullName;
-            NativePipelineSmoke.WriteModel(Path.Combine(folder, "model.gguf"), output);
+            TestModel.Write(Path.Combine(folder, "model.gguf"), output);
             File.Copy(sourceDb, Path.Combine(folder, "shop.db"));
             return AssetDiscoveryService.AddFolder(bundles, folder)!;
         }
