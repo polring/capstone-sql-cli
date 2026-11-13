@@ -29,7 +29,8 @@ namespace SqlApp.ViewModels
 
         public ObservableCollection<ConversationSession> Sessions { get; } = new();
 
-        [ObservableProperty, NotifyPropertyChangedFor(nameof(JsonBatchWorkerCount))]
+        [ObservableProperty, NotifyPropertyChangedFor(nameof(JsonBatchWorkerCount)),
+         NotifyPropertyChangedFor(nameof(HasJsonAttachment)), NotifyPropertyChangedFor(nameof(PendingJsonFileName))]
         public partial ConversationSession? SelectedSession { get; set; }
 
         public int JsonBatchWorkerCount
@@ -56,6 +57,31 @@ namespace SqlApp.ViewModels
 
         [ObservableProperty]
         public partial string InputText { get; set; } = string.Empty;
+
+        public bool HasJsonAttachment => SelectedSession?.PendingJsonFilePath != null;
+        public string PendingJsonFileName => Path.GetFileName(SelectedSession?.PendingJsonFilePath) ?? string.Empty;
+
+        public void AttachJsonFile(string filePath)
+        {
+            if (SelectedSession is { } session && !IsGenerating && !string.IsNullOrWhiteSpace(filePath))
+                SetJsonAttachment(session, filePath);
+        }
+
+        public void ClearJsonAttachment()
+        {
+            if (SelectedSession is { } session) SetJsonAttachment(session, null);
+        }
+
+        private void SetJsonAttachment(ConversationSession session, string? filePath)
+        {
+            if (session.PendingJsonFilePath == filePath) return;
+            session.PendingJsonFilePath = filePath;
+            if (session == SelectedSession)
+            {
+                OnPropertyChanged(nameof(HasJsonAttachment));
+                OnPropertyChanged(nameof(PendingJsonFileName));
+            }
+        }
 
         [ObservableProperty, NotifyPropertyChangedFor(nameof(CanStartInference))]
         public partial bool IsGenerating { get; set; }
@@ -441,7 +467,7 @@ namespace SqlApp.ViewModels
         [RelayCommand]
         public void UsePromptSuggestion(string? suggestion)
         {
-            if (!string.IsNullOrWhiteSpace(suggestion))
+            if (!HasJsonAttachment && !string.IsNullOrWhiteSpace(suggestion))
             {
                 InputText = suggestion;
             }
@@ -480,16 +506,20 @@ namespace SqlApp.ViewModels
         public async Task SendMessageAsync()
         {
             var session = SelectedSession;
-            if (session == null || string.IsNullOrWhiteSpace(InputText) || IsGenerating)
+            if (session == null || IsGenerating) return;
+            string? filePath = session.PendingJsonFilePath;
+            if (filePath == null && string.IsNullOrWhiteSpace(InputText)) return;
+
+            var bundle = GetAvailableSessionBundle();
+            if (bundle == null) return;
+            if (filePath != null)
             {
+                await RunJsonBatchAsync(session, bundle, filePath);
                 return;
             }
 
             bool dual = IsDualMode;
             var range = SelectedRange;
-            var bundle = GetAvailableSessionBundle();
-            if (bundle == null) return;
-
             string chatInput = InputText;
             int maxTokens = session.MaxTokens;
             ClearInputs();
@@ -639,20 +669,12 @@ namespace SqlApp.ViewModels
             session.Messages.Insert(index, resultMessage);
         }
 
-        [RelayCommand]
-        public async Task ImportJsonFileAsync(string filePath)
+        private async Task RunJsonBatchAsync(ConversationSession session, AssetBundle bundle, string filePath)
         {
-            var session = SelectedSession;
-            if (session == null || IsGenerating || string.IsNullOrWhiteSpace(filePath)) return;
-            var bundle = GetAvailableSessionBundle();
-            if (bundle == null) return;
-
             var range = session.SelectedRange;
             int maxTokens = session.MaxTokens;
             int workerCount = session.JsonBatchWorkerCount;
             string fileName = Path.GetFileName(filePath);
-            SetDefaultTitle(session, fileName);
-            session.Messages.Add(new ChatMessage { Sender = MessageSender.User, Text = $"JSON 첨부 · {fileName}" });
             var summary = new ChatMessage { Sender = MessageSender.Assistant };
             using var cancellation = new CancellationTokenSource();
             var additionalWorkers = new List<InferenceService>();
@@ -660,6 +682,9 @@ namespace SqlApp.ViewModels
             _batchSession = session;
             IsGenerating = true;
             BatchState = JsonBatchState.Preparing;
+            SetJsonAttachment(session, null);
+            SetDefaultTitle(session, fileName);
+            session.Messages.Add(new ChatMessage { Sender = MessageSender.User, Text = $"JSON 첨부 · {fileName}" });
             StatusMessage = $"{fileName} 처리 중…";
             try
             {
@@ -684,7 +709,7 @@ namespace SqlApp.ViewModels
                     : $"전체 {result.Total}개 중 ";
                 string counts = result.IsEvaluation
                     ? $"{result.Matched}개가 일치했습니다."
-                    : $"{result.Succeeded}개의 output을 저장했습니다.";
+                    : $"{result.Succeeded}개의 추론 결과를 저장했습니다.";
                 if (result.Succeeded < result.Processed)
                     counts += $" 추론 실패 {result.Processed - result.Succeeded}개.";
                 summary.Text = result.Processed == 0

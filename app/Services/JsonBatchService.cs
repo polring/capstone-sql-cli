@@ -56,21 +56,18 @@ internal static class JsonBatchService
                 var prediction = await completed;
                 var row = rows[prediction.RowIndex];
                 var outputs = prediction.Outputs;
+                row["inferred"] = outputs.Length switch
+                {
+                    0 => null,
+                    1 => JsonValue.Create(outputs[0]),
+                    _ => new JsonArray(outputs.Select(s => (JsonNode?)JsonValue.Create(s)).ToArray())
+                };
                 if (outputs.Length > 0) succeeded++;
                 if (isEvaluation)
                 {
-                    bool correct = outputs.Contains(row["output"]!.GetValue<string>(), StringComparer.Ordinal);
+                    bool correct = outputs.Contains(row["expected"]!.GetValue<string>(), StringComparer.Ordinal);
                     row["matched"] = correct;
                     if (correct) matched++;
-                }
-                else
-                {
-                    row["output"] = outputs.Length switch
-                    {
-                        0 => null,
-                        1 => JsonValue.Create(outputs[0]),
-                        _ => new JsonArray(outputs.Select(s => (JsonNode?)JsonValue.Create(s)).ToArray())
-                    };
                 }
                 processed++;
                 onProgress?.Invoke(processed, rows.Count);
@@ -132,12 +129,12 @@ internal static class JsonBatchService
                 !input.TryGetValue<string>(out var question) || string.IsNullOrWhiteSpace(question))
                 throw new FormatException($"{number}번째 항목에 비어 있지 않은 문자열 input이 필요합니다.");
 
-            bool hasOutput = row.TryGetPropertyValue("output", out var output);
-            if (hasOutput && (output is not JsonValue value || !value.TryGetValue<string>(out _)))
-                throw new FormatException($"{number}번째 항목의 output은 정답 문자열이어야 합니다.");
-            if (isEvaluation.HasValue && isEvaluation.Value != hasOutput)
-                throw new FormatException($"{number}번째 항목의 형식이 다릅니다. 한 파일의 모든 항목에 output이 있거나 모두 없어야 합니다.");
-            isEvaluation = hasOutput;
+            bool hasExpected = row.TryGetPropertyValue("expected", out var expected);
+            if (hasExpected && (expected is not JsonValue value || !value.TryGetValue<string>(out _)))
+                throw new FormatException($"{number}번째 항목의 expected 필드에는 정답 문자열이 필요합니다.");
+            if (isEvaluation.HasValue && isEvaluation.Value != hasExpected)
+                throw new FormatException($"{number}번째 항목의 형식이 다릅니다. 한 파일의 모든 항목에 expected 필드가 있거나 모두 없어야 합니다.");
+            isEvaluation = hasExpected;
             rows.Add(row);
         }
         if (rows.Count == 0) throw new FormatException("JSON 배열에 처리할 입력이 없습니다.");

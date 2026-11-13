@@ -66,7 +66,7 @@ public sealed partial class MainPage : Page
 
     private void PromptSuggestion_Click(object sender, RoutedEventArgs e)
     {
-        if (sender is not Button { DataContext: string suggestion }) return;
+        if (ViewModel.HasJsonAttachment || sender is not Button { DataContext: string suggestion }) return;
         ViewModel.UsePromptSuggestionCommand.Execute(suggestion);
         PromptTextBox.Focus(FocusState.Programmatic);
         PromptTextBox.Select(PromptTextBox.Text.Length, 0);
@@ -134,28 +134,8 @@ public sealed partial class MainPage : Page
             if (!isShift)
             {
                 e.Handled = true;
-                string text = PromptTextBox.Text;
-                if (!string.IsNullOrWhiteSpace(text) && !ViewModel.IsGenerating)
-                {
-                    ViewModel.InputText = text;
-                    if (ViewModel.SendMessageCommand.CanExecute(null))
-                    {
-                        ViewModel.SendMessageCommand.Execute(null);
-                    }
-                }
-            }
-        }
-    }
-
-    private void SendButton_Click(object sender, RoutedEventArgs e)
-    {
-        string text = PromptTextBox.Text;
-        if (!string.IsNullOrWhiteSpace(text) && !ViewModel.IsGenerating)
-        {
-            ViewModel.InputText = text;
-            if (ViewModel.SendMessageCommand.CanExecute(null))
-            {
-                ViewModel.SendMessageCommand.Execute(null);
+                if (!ViewModel.HasJsonAttachment && ViewModel.CanStartInference && ViewModel.SendMessageCommand.CanExecute(null))
+                    ViewModel.SendMessageCommand.Execute(null);
             }
         }
     }
@@ -208,11 +188,17 @@ public sealed partial class MainPage : Page
 
     private async void AttachButton_Click(object sender, RoutedEventArgs e)
     {
+        var session = ViewModel.SelectedSession;
+        if (session == null || !ViewModel.CanStartInference) return;
         string? path = await PickFileAsync(".json");
-        if (!string.IsNullOrEmpty(path))
-        {
-            await ViewModel.ImportJsonFileAsync(path);
-        }
+        if (!string.IsNullOrEmpty(path) && ViewModel.SelectedSession == session)
+            ViewModel.AttachJsonFile(path);
+    }
+
+    private void RemoveAttachment_Click(object sender, RoutedEventArgs e)
+    {
+        ViewModel.ClearJsonAttachment();
+        PromptTextBox.Focus(FocusState.Programmatic);
     }
 
     private void RunSqlButton_Click(object sender, RoutedEventArgs e)

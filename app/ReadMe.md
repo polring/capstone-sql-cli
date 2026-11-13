@@ -16,7 +16,7 @@
 
 전송 버튼과 Enter는 모두 `MainViewModel.SendMessageAsync`를 호출합니다. 단일 모드에서는 직접 입력한 질문을 `InferenceService.RunQueryAsync`로 보냅니다. 이중 모드에서는 전송 버튼 왼쪽의 아래쪽 꺾쇠를 눌러 슬라이더를 엽니다. 메뉴 안의 **›**를 누르면 다섯 구간이 표시되고, 하나를 고르면 슬라이더로 돌아옵니다. `PipelineRunner.RunAsync`는 현재 채팅창에 입력한 원문 질문(앞모델 시작) 또는 일반화 질문(뒷모델 단독)을 받아 실행합니다. [화면 이벤트](MainPage.xaml.cs) · [구간 선택 컨트롤](Controls/StageRangeSlider.xaml.cs) · [구간 실행](Services/Pipeline/PipelineRunner.cs)
 
-두 모드 모두 채팅바 왼쪽 아래 **+**로 JSON 파일을 고르면 각 항목의 `input`을 현재 설정으로 추론합니다. 결과 파일은 원본 폴더에 저장하고 채팅에는 처리 건수와 저장 경로를 표시합니다. [JSON 일괄 처리](Services/JsonBatchService.cs)
+두 모드 모두 채팅바 왼쪽 아래 **+**로 JSON 파일을 첨부하면 질문 입력란에 파일명이 표시됩니다. 파일명 옆 **×**를 누르면 질문 입력란으로 돌아갑니다. **전송**을 누르면 각 항목의 `input`을 현재 설정으로 추론해 `inferred`에 기록합니다. 모든 항목에 정답 문자열 `expected`가 있으면 일치 여부도 `matched`에 기록합니다. 결과 파일은 원본 폴더에 저장하고 채팅에는 처리 건수와 저장 경로를 표시합니다. [JSON 일괄 처리](Services/JsonBatchService.cs)
 
 | 처리 | 구현과 입출력 |
 | --- | --- |

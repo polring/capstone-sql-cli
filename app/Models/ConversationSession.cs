@@ -15,6 +15,7 @@ public sealed partial class ConversationSession : ObservableObject
     public AssetBundle? Bundle { get; set; }
     public string BundleDirectory { get; set; } = string.Empty;
     public bool IsDualMode { get; set; }
+    internal string? PendingJsonFilePath { get; set; }
     public StageRange SelectedRange
     {
         get;
