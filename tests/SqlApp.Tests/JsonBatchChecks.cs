@@ -108,14 +108,74 @@ internal static class JsonBatchChecks
             Require(session.Messages.Count(m => m.IsAssistant) == previousReplies + 1 &&
                 session.Messages.Last().Text.Contains(resultPath), "Dual and single imports both post one result summary");
         }
+        vm.JsonBatchWorkerCount = 1;
+        vm.CreateNewSession();
+        var otherSession = vm.SelectedSession!;
+        Require(vm.JsonBatchWorkerCount == Math.Min(4, Environment.ProcessorCount),
+            "A new conversation starts with the default JSON worker count");
+        vm.JsonBatchWorkerCount = Math.Min(5, Environment.ProcessorCount);
+        vm.SelectSession(session);
+        Require(vm.JsonBatchWorkerCount == 1, "Switching conversations restores the selected worker count");
         await history.SaveSessionsAsync(vm.Sessions);
-        var restored = (await history.LoadSessionsAsync(assets)).Single(s => s.Id == session.Id);
+        var savedSessions = await history.LoadSessionsAsync(assets);
+        var restored = savedSessions.Single(s => s.Id == session.Id);
+        Require(restored.JsonBatchWorkerCount == 1 &&
+            savedSessions.Single(s => s.Id == otherSession.Id).JsonBatchWorkerCount == Math.Min(5, Environment.ProcessorCount),
+            "Worker counts survive reopening independently for each conversation");
         Require(restored.Messages.Any(m => m.Id == summary.Id && m.Text == summary.Text && !m.IsWaitingResponse),
             "Reloading the conversation preserves completed batch summaries");
         await VerifyCandidatesAndInvalidInputAsync(directory);
-        await VerifyBatchStopAsync(directory, assets, dual: false);
-        await VerifyBatchStopAsync(directory, assets, dual: true);
+        foreach (bool dualMode in new[] { false, true })
+        {
+            await VerifyWorkerSelectionAsync(directory, assets, dualMode);
+            if (Environment.ProcessorCount >= 2)
+                await VerifyBatchStopAsync(directory, assets, dualMode);
+        }
         await JsonBatchCancellationChecks.RunAsync(directory);
+    }
+
+    private static async Task VerifyWorkerSelectionAsync(string directory, List<AssetBundle> assets, bool dual)
+    {
+        string name = dual ? "workers-dual" : "workers-single";
+        var history = new SessionStorageService(Path.Combine(directory, name));
+        using var inference = new InferenceService();
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        int expected = 0;
+        int started = 0;
+        async Task<InferenceResult> Predict(string input)
+        {
+            if (Interlocked.Increment(ref started) == expected) release.SetResult();
+            await release.Task;
+            return new InferenceResult(input, "eos", 1);
+        }
+        var vm = new MainViewModel(assets.ToList(), history, inference,
+            (_, _, input, _) => Predict(input), (_, input, _) => Predict(input));
+        await vm.Initialization;
+        vm.SetDualMode(dual);
+        vm.SelectBundle(assets.Single(b => b.IsDual == dual));
+        if (dual) vm.SelectRange(new(PipelineStage.Front, PipelineStage.Front));
+        vm.PropertyChanged += (_, e) =>
+        {
+            if (e.PropertyName == nameof(vm.StatusMessage) && vm.StatusMessage.Contains(" · 1/"))
+                vm.CancelJsonBatch();
+        };
+
+        int high = Math.Min(5, Environment.ProcessorCount);
+        foreach (var (workers, rows) in new[] { (1, 7), (high, 7), (high, 2) })
+        {
+            vm.JsonBatchWorkerCount = workers;
+            expected = Math.Min(workers, rows);
+            started = 0;
+            release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            var source = new JsonArray();
+            for (int n = 1; n <= rows; n++) source.Add(new JsonObject { ["input"] = $"question {n}" });
+            string path = Path.Combine(directory, name + ".json");
+            await File.WriteAllTextAsync(path, source.ToJsonString());
+            // No prediction can finish until the entire first group has started.
+            await vm.ImportJsonFileAsync(path).WaitAsync(TimeSpan.FromSeconds(10));
+            var saved = JsonNode.Parse(await File.ReadAllTextAsync(Path.Combine(directory, name + "_infer.json")))!.AsArray();
+            Require(started == expected && saved.Count == expected, $"Selecting {workers} workers for {rows} questions");
+        }
     }
 
     private static async Task VerifyBatchStopAsync(string directory, List<AssetBundle> assets, bool dual)
@@ -142,10 +202,11 @@ internal static class JsonBatchChecks
         var vm = new MainViewModel(assets.ToList(), history, inference,
             (stage, _, input, _) => stage == PipelineStage.Front ? Predict(input) :
                 Task.FromResult(new InferenceResult($"SELECT {{COUNT(*)}} FROM <TABLE1> LIMIT {input[0]}", "eos", 1)),
-            (_, input, _) => Predict(input), batchWorkerCount: 2);
+            (_, input, _) => Predict(input));
         await vm.Initialization;
         vm.SetDualMode(dual);
         vm.SelectBundle(assets.Single(b => b.IsDual == dual));
+        vm.JsonBatchWorkerCount = 2;
         var session = vm.SelectedSession!;
         var rows = new JsonArray();
         for (int n = 1; n <= calls.Length; n++)

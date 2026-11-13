@@ -12,6 +12,8 @@ namespace SqlApp;
 public sealed partial class MainPage : Page
 {
     public MainViewModel ViewModel { get; } = new();
+    private IReadOnlyList<int> JsonBatchWorkerOptions { get; } =
+        Enumerable.Range(1, ConversationSession.MaxJsonBatchWorkerCount).ToArray();
 
     public MainPage()
     {
@@ -55,6 +57,12 @@ public sealed partial class MainPage : Page
 
     private void SingleMode_Click(object sender, RoutedEventArgs e) => ViewModel.SetDualMode(false);
     private void DualMode_Click(object sender, RoutedEventArgs e) => ViewModel.SetDualMode(true);
+
+    private void JsonBatchWorkerCount_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (sender is ComboBox { SelectedItem: int count })
+            ViewModel.JsonBatchWorkerCount = count;
+    }
 
     private void PromptSuggestion_Click(object sender, RoutedEventArgs e)
     {

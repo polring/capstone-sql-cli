@@ -35,6 +35,6 @@
 
 ## 대화 저장
 
-대화는 운영체제의 `LocalApplicationData` 아래 `capstone_sql_gui/sessions.json`에 저장합니다. Windows 경로는 `%LOCALAPPDATA%\capstone_sql_gui\sessions.json`입니다. 세션에는 모드·폴더·실행 구간·Max Tokens를, 응답에는 단계별 입출력·복원 후보·최종 SQL·조회 결과와의 연결을 저장합니다. 앱을 다시 열면 원래 DB 경로로 실행 가능 여부를 새로 검사합니다. [대화 저장·복원](Services/SessionStorageService.cs)
+대화는 운영체제의 `LocalApplicationData` 아래 `capstone_sql_gui/sessions.json`에 저장합니다. Windows 경로는 `%LOCALAPPDATA%\capstone_sql_gui\sessions.json`입니다. 세션에는 모드·폴더·실행 구간·Max Tokens·JSON 병렬 처리 개수를, 응답에는 단계별 입출력·복원 후보·최종 SQL·조회 결과와의 연결을 저장합니다. 앱을 다시 열면 원래 DB 경로로 실행 가능 여부를 새로 검사합니다. [대화 저장·복원](Services/SessionStorageService.cs)
 
 이중 모델의 모든 실행 구간에서 응답 오른쪽 위의 **ⓘ**를 누르면 실제로 실행된 단계의 입력과 출력을 볼 수 있습니다. 매퍼의 **입력**에는 원문 질문과 앞모델의 태그 문장이 차례로 나옵니다. **매핑**에는 `customers = <customers>`처럼 원문 표현과 태그가, **출력**에는 일반화된 질문이 표시됩니다. 매핑 후보가 여러 개면 번호로 구분합니다. 후처리기의 **출력**에서 각 최종 SQL과 그 SQL을 만든 후보 번호를 확인할 수 있습니다.

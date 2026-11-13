@@ -6,6 +6,8 @@ namespace SqlApp.Models;
 public sealed partial class ConversationSession : ObservableObject
 {
     public const int DefaultMaxTokens = 200;
+    public static int MaxJsonBatchWorkerCount => Environment.ProcessorCount;
+    public static int DefaultJsonBatchWorkerCount => Math.Min(4, MaxJsonBatchWorkerCount);
 
     public string Id { get; set; } = Guid.NewGuid().ToString();
     public DateTime CreatedAt { get; set; } = DateTime.Now;
@@ -22,6 +24,11 @@ public sealed partial class ConversationSession : ObservableObject
     [ObservableProperty] public partial string Title { get; set; } = string.Empty;
     [ObservableProperty] public partial bool IsEditingTitle { get; set; }
     [ObservableProperty] public partial int MaxTokens { get; set; } = DefaultMaxTokens;
+    public int JsonBatchWorkerCount
+    {
+        get;
+        set => SetProperty(ref field, Math.Clamp(value, 1, MaxJsonBatchWorkerCount));
+    } = DefaultJsonBatchWorkerCount;
 
     public ObservableCollection<ChatMessage> Messages { get; } = new();
     public bool HasMessages => Messages.Count != 0;

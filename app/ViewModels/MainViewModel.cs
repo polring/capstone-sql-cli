@@ -22,7 +22,6 @@ namespace SqlApp.ViewModels
         private readonly List<AssetBundle> _allBundles;
         private readonly Func<PipelineStage, string, string, int, Task<InferenceResult>>? _runStageOverride;
         private readonly Func<string, string, int, Task<InferenceResult>>? _runSingleOverride;
-        private readonly int _batchWorkerCount;
         private CancellationTokenSource? _batchCancellation;
         private ConversationSession? _batchSession;
         internal Task Initialization { get; }
@@ -30,8 +29,20 @@ namespace SqlApp.ViewModels
 
         public ObservableCollection<ConversationSession> Sessions { get; } = new();
 
-        [ObservableProperty]
+        [ObservableProperty, NotifyPropertyChangedFor(nameof(JsonBatchWorkerCount))]
         public partial ConversationSession? SelectedSession { get; set; }
+
+        public int JsonBatchWorkerCount
+        {
+            get => SelectedSession?.JsonBatchWorkerCount ?? ConversationSession.DefaultJsonBatchWorkerCount;
+            set
+            {
+                if (SelectedSession is not { } session || session.JsonBatchWorkerCount == value) return;
+                session.JsonBatchWorkerCount = value;
+                OnPropertyChanged();
+                _ = _sessionStorageService.SaveSessionsAsync(Sessions);
+            }
+        }
 
         partial void OnSelectedSessionChanged(ConversationSession? value)
         {
@@ -290,15 +301,13 @@ namespace SqlApp.ViewModels
 
         internal MainViewModel(List<AssetBundle> bundles, SessionStorageService sessionStorage, InferenceService inference,
             Func<PipelineStage, string, string, int, Task<InferenceResult>>? runStage = null,
-            Func<string, string, int, Task<InferenceResult>>? runSingle = null, int? batchWorkerCount = null)
+            Func<string, string, int, Task<InferenceResult>>? runSingle = null)
         {
             _allBundles = bundles;
             _sqlExecutionService = new SqlExecutionService();
             _inferenceService = inference;
             _runStageOverride = runStage;
             _runSingleOverride = runSingle;
-            _batchWorkerCount = batchWorkerCount ?? Math.Min(Environment.ProcessorCount, 4);
-            ArgumentOutOfRangeException.ThrowIfLessThan(_batchWorkerCount, 1, nameof(batchWorkerCount));
             _sessionStorageService = sessionStorage;
             Initialization = LoadInitialSessionsAsync();
         }
@@ -640,6 +649,7 @@ namespace SqlApp.ViewModels
 
             var range = session.SelectedRange;
             int maxTokens = session.MaxTokens;
+            int workerCount = session.JsonBatchWorkerCount;
             string fileName = Path.GetFileName(filePath);
             SetDefaultTitle(session, fileName);
             session.Messages.Add(new ChatMessage { Sender = MessageSender.User, Text = $"JSON 첨부 · {fileName}" });
@@ -655,9 +665,9 @@ namespace SqlApp.ViewModels
             {
                 var schema = await GetPipelineSchemaAsync(bundle, range);
                 // Each service serializes its own model handle. Keep the first worker's warmed models for reuse.
-                for (int i = 1; i < _batchWorkerCount; i++)
+                for (int i = 1; i < workerCount; i++)
                     additionalWorkers.Add(new InferenceService());
-                var workers = new List<Func<string, Task<IReadOnlyList<string>>>>(_batchWorkerCount);
+                var workers = new List<Func<string, Task<IReadOnlyList<string>>>>(workerCount);
                 string sessionId = session.Id;
                 foreach (var worker in additionalWorkers.Prepend(_inferenceService))
                     workers.Add(input => InferBatchRowAsync(worker, bundle, range, input, schema, maxTokens, sessionId));

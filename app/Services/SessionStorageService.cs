@@ -21,6 +21,7 @@ namespace SqlApp.Services
         public string ModelPath { get; set; } = string.Empty;
         public string DbPath { get; set; } = string.Empty;
         public int MaxTokens { get; set; } = ConversationSession.DefaultMaxTokens;
+        public int JsonBatchWorkerCount { get; set; } = ConversationSession.DefaultJsonBatchWorkerCount;
         public List<ChatMessageDto> Messages { get; set; } = new();
     }
 
@@ -81,6 +82,7 @@ namespace SqlApp.Services
                         ModelPath = s.Bundle?.ModelPath ?? string.Empty,
                         DbPath = s.Bundle?.DbPath ?? string.Empty,
                         MaxTokens = s.MaxTokens,
+                        JsonBatchWorkerCount = s.JsonBatchWorkerCount,
                     };
 
                     foreach (var m in s.Messages)
@@ -175,6 +177,7 @@ namespace SqlApp.Services
                         IsDualMode = dto.IsDualMode,
                         SelectedRange = dto.SelectedRange ?? new StageRange(PipelineStage.Front, PipelineStage.Postprocessor),
                         MaxTokens = dto.MaxTokens,
+                        JsonBatchWorkerCount = dto.JsonBatchWorkerCount,
                     };
 
                     foreach (var m in dto.Messages)

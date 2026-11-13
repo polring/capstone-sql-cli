@@ -142,6 +142,8 @@ try
     var previous = (await store.LoadSessionsAsync(assets)).Single();
     Require(!previous.IsDualMode && previous.Messages[0].CanExecuteSql && previous.Bundle?.ModelPath == singleModel,
         "Legacy session restores as single mode with its original DB");
+    Require(previous.JsonBatchWorkerCount == Math.Min(4, Environment.ProcessorCount),
+        "A session saved before the worker setting existed keeps its previous parallelism");
     Require(previous.Messages[1] is { HasSqlValidationError: true, CanExecuteSql: false },
         "Legacy invalid SQL remains visible but cannot run");
     Require(previous.Messages[0] is { InferenceTimeMs: 3, ComputeTimeMs: null },

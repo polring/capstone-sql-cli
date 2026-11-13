@@ -210,6 +210,17 @@
                            Background="Transparent" BorderThickness="0" CornerRadius="3" IsSpellCheckEnabled="False" />
                 </StackPanel>
               </Border>
+
+              <StackPanel Orientation="Horizontal" Spacing="4" VerticalAlignment="Center">
+                <TextBlock Text="병렬" FontSize="11" FontWeight="SemiBold" VerticalAlignment="Center"
+                           Foreground="{ThemeResource AccentFillColorDefaultBrush}" />
+                <ComboBox ItemsSource="{x:Bind JsonBatchWorkerOptions}"
+                          SelectedItem="{x:Bind ViewModel.JsonBatchWorkerCount, Mode=OneWay}"
+                          SelectionChanged="JsonBatchWorkerCount_SelectionChanged"
+                          AutomationProperties.Name="JSON 동시 처리 질문 수"
+                          ToolTipService.ToolTip="JSON에서 동시에 처리할 질문 수입니다. 실행 중에 바꾸면 다음 JSON 파일부터 적용됩니다."
+                          MinWidth="56" MinHeight="28" Padding="6,2" FontSize="12" CornerRadius="4" />
+              </StackPanel>
             </StackPanel>
           </ScrollViewer>
 
